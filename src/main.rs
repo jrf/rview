@@ -99,8 +99,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
     loop {
         app.refresh_from_scanner();
         app.poll_filter();
-        if app.poll_thumbnails() {
-            app.needs_render = true;
+        let new_thumbs = app.poll_thumbnails();
+        if !new_thumbs.is_empty() && app.mode == ViewMode::Gallery {
+            emit_new_thumbnails(app, &new_thumbs)?;
         }
 
         if app.scan_complete && app.images.is_empty() {
@@ -254,6 +255,29 @@ fn render_fullscreen_image(app: &App) -> io::Result<()> {
         encoder::kitty::encode_to(&mut out, img)?;
     }
 
+    out.flush()
+}
+
+fn emit_new_thumbnails(app: &App, new_indices: &[usize]) -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    for (vis_idx, img_idx) in app.gallery.visible_items() {
+        if !new_indices.contains(&img_idx) {
+            continue;
+        }
+        let cell_rect = app.gallery.cell_rect(vis_idx);
+        if let Some((img, id)) = app.thumb_cache.peek(img_idx) {
+            queue!(out, cursor::MoveTo(cell_rect.x + 1, cell_rect.y + 1))?;
+            encoder::kitty::encode_with_opts(
+                &mut out,
+                img,
+                &encoder::kitty::DisplayOpts {
+                    id: Some(id),
+                    cols: None,
+                    rows: None,
+                },
+            )?;
+        }
+    }
     out.flush()
 }
 

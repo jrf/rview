@@ -183,16 +183,16 @@ impl App {
         }
     }
 
-    pub fn poll_thumbnails(&mut self) -> bool {
-        let mut any_new = false;
+    pub fn poll_thumbnails(&mut self) -> Vec<usize> {
+        let mut new_indices = Vec::new();
         while let Ok((generation, img_idx, img)) = self.thumb_rx.try_recv() {
             self.thumb_loading.remove(&img_idx);
             if generation == self.thumb_generation {
                 self.thumb_cache.insert(img_idx, img);
-                any_new = true;
+                new_indices.push(img_idx);
             }
         }
-        any_new
+        new_indices
     }
 
     pub fn spawn_thumb_decode(&mut self, img_idx: usize, path: PathBuf, rect: Rect) {
