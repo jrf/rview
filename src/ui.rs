@@ -183,6 +183,12 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let max_label = THUMB_COLS as usize - 2;
+        let filename = if filename.len() > max_label {
+            format!("{}\u{2026}", &filename[..max_label - 1])
+        } else {
+            filename
+        };
 
         let label_y = cell_y + THUMB_ROWS;
         if label_y < grid_rect.bottom() {

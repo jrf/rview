@@ -32,6 +32,10 @@ struct Cli {
     /// Color theme (tokyonight, dark, light, catppuccin, nord)
     #[arg(short, long, default_value = "tokyonight")]
     theme: String,
+
+    /// Number of threads for image decoding [default: all cores]
+    #[arg(short = 'j', long)]
+    threads: Option<usize>,
 }
 
 fn main() -> io::Result<()> {
@@ -41,6 +45,13 @@ fn main() -> io::Result<()> {
     } else {
         cli.files
     };
+
+    if let Some(n) = cli.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .ok();
+    }
 
     for p in &paths {
         if !p.is_dir() && !p.exists() {

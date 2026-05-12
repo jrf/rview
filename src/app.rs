@@ -72,11 +72,12 @@ impl App {
         let new_len = self.shared_list.len();
         if new_len > self.known_len {
             let (new_paths, new_filenames) = self.shared_list.drain_since(self.known_len);
+            let old_len = self.images.len();
             self.images.extend(new_paths);
             self.filenames.extend(new_filenames);
 
             if self.gallery.search_query.is_empty() {
-                self.gallery.filtered_indices = (0..self.images.len()).collect();
+                self.gallery.filtered_indices.extend(old_len..self.images.len());
             } else {
                 self.update_filter();
             }

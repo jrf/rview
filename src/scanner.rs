@@ -42,14 +42,15 @@ fn scan_dir(dir: &Path, list: &SharedImageList, batch: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut dir_images: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && is_image(p))
-        .collect();
-    dir_images.sort();
-
-    for path in dir_images {
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !is_image(&path) {
+            continue;
+        }
         batch.push(path);
         if batch.len() >= BATCH_SIZE {
             list.push_batch(std::mem::take(batch));
