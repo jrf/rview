@@ -2,5 +2,16 @@
 name = "rview"
 version = "0.1.0"
 edition = "2024"
+description = "A fast terminal image viewer with Kitty graphics protocol support"
 
 [dependencies]
+image = "0.25"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+ratatui = "0.29"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
