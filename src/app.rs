@@ -311,7 +311,14 @@ impl App {
 }
 
 pub(crate) fn load_and_resize(path: &Path, rect: Rect, cell_px: (u32, u32)) -> io::Result<RgbaImage> {
-    let img = decode_image(path)?;
+    let target_w = rect.width as u32 * cell_px.0;
+    let target_h = rect.height as u32 * cell_px.1;
+    let hint = if target_w > 0 && target_h > 0 {
+        Some((target_w, target_h))
+    } else {
+        None
+    };
+    let img = decode_image_with_hint(path, hint)?;
     Ok(resize_decoded(&img, rect, cell_px))
 }
 
@@ -342,10 +349,10 @@ pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)
     RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec()).unwrap_or_else(|| img.to_rgba8())
 }
 
-pub(crate) fn decode_image(path: &Path) -> io::Result<DynamicImage> {
+pub(crate) fn decode_image_with_hint(path: &Path, target: Option<(u32, u32)>) -> io::Result<DynamicImage> {
     #[cfg(feature = "turbo")]
     if is_jpeg(path) {
-        if let Ok(img) = decode_jpeg_turbo(path) {
+        if let Ok(img) = decode_jpeg_turbo(path, target) {
             return Ok(img);
         }
     }
@@ -366,24 +373,62 @@ fn is_jpeg(path: &Path) -> bool {
 }
 
 #[cfg(feature = "turbo")]
-fn decode_jpeg_turbo(path: &Path) -> io::Result<DynamicImage> {
+fn pick_scaling_factor(orig_w: usize, orig_h: usize, target_w: u32, target_h: u32) -> turbojpeg::ScalingFactor {
+    let candidates = [
+        turbojpeg::ScalingFactor::ONE_EIGHTH,
+        turbojpeg::ScalingFactor::ONE_QUARTER,
+        turbojpeg::ScalingFactor::ONE_HALF,
+        turbojpeg::ScalingFactor::ONE,
+    ];
+    let tw = target_w as usize;
+    let th = target_h as usize;
+    for &sf in &candidates {
+        let sw = sf.scale(orig_w);
+        let sh = sf.scale(orig_h);
+        if sw >= tw && sh >= th {
+            return sf;
+        }
+    }
+    turbojpeg::ScalingFactor::ONE
+}
+
+#[cfg(feature = "turbo")]
+fn decode_jpeg_turbo(path: &Path, target: Option<(u32, u32)>) -> io::Result<DynamicImage> {
     let data = std::fs::read(path)?;
-    let image: turbojpeg::Image<Vec<u8>> =
-        turbojpeg::decompress(&data, turbojpeg::PixelFormat::RGBA)
+    let mut decompressor = turbojpeg::Decompressor::new()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let header = decompressor.read_header(&data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let scaling = match target {
+        Some((tw, th)) if tw > 0 && th > 0 && !header.is_lossless => {
+            pick_scaling_factor(header.width, header.height, tw, th)
+        }
+        _ => turbojpeg::ScalingFactor::ONE,
+    };
+
+    if scaling != turbojpeg::ScalingFactor::ONE {
+        decompressor.set_scaling_factor(scaling)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    }
+
+    let scaled = header.scaled(scaling);
+    let pitch = scaled.width * 4;
+    let mut image = turbojpeg::Image {
+        pixels: vec![0u8; scaled.height * pitch],
+        width: scaled.width,
+        pitch,
+        height: scaled.height,
+        format: turbojpeg::PixelFormat::RGBA,
+    };
+
+    decompressor.decompress(&data, image.as_deref_mut())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
     let w = image.width as u32;
     let h = image.height as u32;
-    let pixels = if image.pitch == image.width * 4 {
-        image.pixels
-    } else {
-        image
-            .pixels
-            .chunks(image.pitch)
-            .flat_map(|row| &row[..image.width * 4])
-            .copied()
-            .collect()
-    };
-    RgbaImage::from_raw(w, h, pixels)
+    RgbaImage::from_raw(w, h, image.pixels)
         .map(DynamicImage::ImageRgba8)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid image dimensions"))
 }

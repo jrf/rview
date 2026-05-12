@@ -1,4 +1,4 @@
-use crate::app::{decode_image, resize_decoded};
+use crate::app::{decode_image_with_hint, resize_decoded};
 use image::{DynamicImage, RgbaImage};
 use lru::LruCache;
 use ratatui::layout::Rect;
@@ -6,13 +6,15 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-const CACHE_CAPACITY: usize = 5;
+const CACHE_CAPACITY: usize = 8;
+const PREFETCH_RADIUS: usize = 3;
 
 pub struct Prefetcher {
     cache: LruCache<usize, DynamicImage>,
     rx: mpsc::Receiver<(usize, DynamicImage)>,
     tx: mpsc::Sender<(usize, DynamicImage)>,
     pending: std::collections::HashSet<usize>,
+    target_hint: Option<(u32, u32)>,
 }
 
 impl Prefetcher {
@@ -23,6 +25,15 @@ impl Prefetcher {
             rx,
             tx,
             pending: std::collections::HashSet::new(),
+            target_hint: None,
+        }
+    }
+
+    pub fn set_target_hint(&mut self, rect: Rect, cell_px: (u32, u32)) {
+        let w = rect.width as u32 * cell_px.0;
+        let h = rect.height as u32 * cell_px.1;
+        if w > 0 && h > 0 {
+            self.target_hint = Some((w, h));
         }
     }
 
@@ -39,11 +50,13 @@ impl Prefetcher {
     }
 
     pub fn kick(&mut self, current: usize, images: &[PathBuf]) {
-        if current > 0 {
-            self.ensure_decoding(current - 1, images);
-        }
-        if current + 1 < images.len() {
-            self.ensure_decoding(current + 1, images);
+        for offset in 1..=PREFETCH_RADIUS {
+            if current + offset < images.len() {
+                self.ensure_decoding(current + offset, images);
+            }
+            if current >= offset {
+                self.ensure_decoding(current - offset, images);
+            }
         }
     }
 
@@ -63,8 +76,9 @@ impl Prefetcher {
         self.pending.insert(index);
         let tx = self.tx.clone();
         let path = images[index].clone();
+        let hint = self.target_hint;
         rayon::spawn(move || {
-            if let Ok(img) = decode_image(&path) {
+            if let Ok(img) = decode_image_with_hint(&path, hint) {
                 let _ = tx.send((index, img));
             }
         });

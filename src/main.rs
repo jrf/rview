@@ -126,6 +126,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 ViewMode::Fullscreen => {
                     app.load_if_needed();
                     render_fullscreen_image(app)?;
+                    app.prefetcher.set_target_hint(app.image_rect, app.cell_px);
                     app.prefetcher.kick(app.current, &app.images);
                 }
                 ViewMode::Gallery => {
