@@ -287,7 +287,11 @@ fn render_fullscreen_image(app: &App) -> io::Result<()> {
             app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
 
         queue!(out, cursor::MoveTo(offset_x, offset_y))?;
-        encoder::kitty::encode_to(&mut out, img)?;
+        encoder::kitty::encode_png_to(
+            &mut out,
+            img,
+            &encoder::kitty::DisplayOpts { id: None, cols: None, rows: None },
+        )?;
     }
 
     out.flush()
