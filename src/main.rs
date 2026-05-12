@@ -155,14 +155,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                             }
                             KeyCode::Enter => {
                                 app.gallery.search_active = false;
+                                app.update_filter();
                             }
                             KeyCode::Backspace => {
                                 app.gallery.search_query.pop();
-                                app.update_filter();
                             }
                             KeyCode::Char(c) => {
                                 app.gallery.search_query.push(c);
-                                app.update_filter();
                             }
                             _ => {}
                         },
