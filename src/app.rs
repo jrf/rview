@@ -6,6 +6,7 @@ use crate::theme::Theme;
 use fast_image_resize as fir;
 use image::{DynamicImage, ImageReader, RgbaImage};
 use ratatui::layout::Rect;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -44,10 +45,17 @@ pub struct App {
 
     // Async filter
     filter_rx: Option<mpsc::Receiver<Vec<usize>>>,
+
+    // Async thumbnails
+    thumb_tx: mpsc::Sender<(u32, usize, RgbaImage)>,
+    thumb_rx: mpsc::Receiver<(u32, usize, RgbaImage)>,
+    thumb_loading: HashSet<usize>,
+    thumb_generation: u32,
 }
 
 impl App {
     pub fn new(theme: Theme, cell_px: (u32, u32), shared_list: SharedImageList) -> Self {
+        let (thumb_tx, thumb_rx) = mpsc::channel();
         Self {
             images: Vec::new(),
             filenames: Vec::new(),
@@ -68,6 +76,10 @@ impl App {
             known_len: 0,
             scan_complete: false,
             filter_rx: None,
+            thumb_tx,
+            thumb_rx,
+            thumb_loading: HashSet::new(),
+            thumb_generation: 0,
         }
     }
 
@@ -171,9 +183,38 @@ impl App {
         }
     }
 
+    pub fn poll_thumbnails(&mut self) -> bool {
+        let mut any_new = false;
+        while let Ok((generation, img_idx, img)) = self.thumb_rx.try_recv() {
+            self.thumb_loading.remove(&img_idx);
+            if generation == self.thumb_generation {
+                self.thumb_cache.insert(img_idx, img);
+                any_new = true;
+            }
+        }
+        any_new
+    }
+
+    pub fn spawn_thumb_decode(&mut self, img_idx: usize, path: PathBuf, rect: Rect) {
+        if self.thumb_cache.contains(img_idx) || self.thumb_loading.contains(&img_idx) {
+            return;
+        }
+        self.thumb_loading.insert(img_idx);
+        let tx = self.thumb_tx.clone();
+        let cell_px = self.cell_px;
+        let generation = self.thumb_generation;
+        rayon::spawn(move || {
+            if let Ok(img) = load_and_resize(&path, rect, cell_px) {
+                let _ = tx.send((generation, img_idx, img));
+            }
+        });
+    }
+
     pub fn mark_dirty(&mut self) {
         self.loaded = None;
         self.thumb_cache.clear();
+        self.thumb_loading.clear();
+        self.thumb_generation += 1;
         self.prefetcher.invalidate();
         self.needs_render = true;
     }

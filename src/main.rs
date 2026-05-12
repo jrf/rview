@@ -18,7 +18,6 @@ use crossterm::{
 };
 use image_list::SharedImageList;
 use ratatui::prelude::*;
-use rayon::prelude::*;
 use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -100,6 +99,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
     loop {
         app.refresh_from_scanner();
         app.poll_filter();
+        if app.poll_thumbnails() {
+            app.needs_render = true;
+        }
 
         if app.scan_complete && app.images.is_empty() {
             return Ok(());
@@ -257,36 +259,17 @@ fn render_fullscreen_image(app: &App) -> io::Result<()> {
 
 fn render_gallery_images(app: &mut App) -> io::Result<()> {
     let visible: Vec<(usize, usize)> = app.gallery.visible_items().collect();
-    let cell_px = app.cell_px;
 
-    let to_load: Vec<(usize, PathBuf, Rect)> = visible
-        .iter()
-        .filter_map(|&(vis_idx, img_idx)| {
-            if app.thumb_cache.contains(img_idx) {
-                return None;
-            }
-            let cell_rect = app.gallery.cell_rect(vis_idx);
-            let inner = Rect {
-                x: cell_rect.x + 1,
-                y: cell_rect.y + 1,
-                width: cell_rect.width.saturating_sub(2),
-                height: cell_rect.height.saturating_sub(2),
-            };
-            Some((img_idx, app.images[img_idx].clone(), inner))
-        })
-        .collect();
-
-    let decoded: Vec<(usize, image::RgbaImage)> = to_load
-        .par_iter()
-        .filter_map(|(img_idx, path, inner)| {
-            app::load_and_resize(path, *inner, cell_px)
-                .ok()
-                .map(|img| (*img_idx, img))
-        })
-        .collect();
-
-    for (img_idx, img) in decoded {
-        app.thumb_cache.insert(img_idx, img);
+    for &(vis_idx, img_idx) in &visible {
+        let cell_rect = app.gallery.cell_rect(vis_idx);
+        let inner = Rect {
+            x: cell_rect.x + 1,
+            y: cell_rect.y + 1,
+            width: cell_rect.width.saturating_sub(2),
+            height: cell_rect.height.saturating_sub(2),
+        };
+        let path = app.images[img_idx].clone();
+        app.spawn_thumb_decode(img_idx, path, inner);
     }
 
     let mut out = io::stdout().lock();
