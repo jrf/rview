@@ -7,6 +7,8 @@ mod scanner;
 mod search;
 mod theme;
 mod ui;
+#[cfg(feature = "video")]
+mod video;
 
 use app::{App, ViewMode};
 use clap::Parser;
@@ -38,6 +40,9 @@ struct Cli {
 }
 
 fn main() -> io::Result<()> {
+    #[cfg(feature = "video")]
+    ffmpeg::init().expect("failed to initialize ffmpeg");
+
     let cli = Cli::parse();
     let paths = if cli.files.is_empty() {
         vec![PathBuf::from(".")]
@@ -113,6 +118,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         app.prefetcher.poll();
         pending_emits.extend(app.poll_thumbnails());
 
+        #[cfg(feature = "video")]
+        if let Some(ref mut v) = app.video {
+            if v.poll_frame() {
+                app.needs_render = true;
+            }
+        }
+
         if app.scan_complete && app.images.is_empty() {
             return Ok(());
         }
@@ -122,6 +134,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
         // 4. Render Kitty images
         if app.needs_render && !app.images.is_empty() {
+            #[cfg(feature = "video")]
+            let is_video = matches!(app.mode, ViewMode::Video);
+            #[cfg(not(feature = "video"))]
+            let is_video = false;
+
             match app.mode {
                 ViewMode::Fullscreen => {
                     app.load_if_needed();
@@ -132,10 +149,17 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 ViewMode::Gallery => {
                     render_gallery_images(app)?;
                 }
+                #[cfg(feature = "video")]
+                ViewMode::Video => {
+                    app.open_video_if_needed();
+                    render_video_frame(app)?;
+                }
             }
             app.needs_render = false;
             pending_emits.clear();
-            terminal.draw(|frame| ui::draw(frame, app))?;
+            if !is_video {
+                terminal.draw(|frame| ui::draw(frame, app))?;
+            }
         } else if !pending_emits.is_empty() && app.mode == ViewMode::Gallery {
             let count = pending_emits.len().min(4);
             let batch: Vec<usize> = pending_emits.drain(..count).collect();
@@ -143,10 +167,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         }
 
         // 5. Wait for next event (shorter timeout when thumbnails are pending)
-        let timeout = if pending_emits.is_empty() {
-            Duration::from_millis(250)
-        } else {
-            Duration::from_millis(50)
+        let timeout = {
+            #[cfg(feature = "video")]
+            if let Some(ref v) = app.video {
+                v.time_until_next_frame()
+            } else if pending_emits.is_empty() {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_millis(50)
+            }
+            #[cfg(not(feature = "video"))]
+            if pending_emits.is_empty() {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_millis(50)
+            }
         };
         event::poll(timeout)?;
     }
@@ -172,6 +207,33 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         }
                         KeyCode::Left | KeyCode::Char('h') => app.prev(),
                         KeyCode::Right | KeyCode::Char('l') => app.next(),
+                        _ => {}
+                    },
+                    #[cfg(feature = "video")]
+                    ViewMode::Video => match key.code {
+                        KeyCode::Char('q') => return Ok(true),
+                        KeyCode::Char(' ') => {
+                            if let Some(ref mut v) = app.video {
+                                v.toggle_pause();
+                                app.needs_render = true;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            encoder::kitty::delete_all()?;
+                            app.exit_video();
+                        }
+                        KeyCode::Char('?') => {
+                            encoder::kitty::delete_all()?;
+                            app.help_visible = true;
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            encoder::kitty::delete_all()?;
+                            app.prev();
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            encoder::kitty::delete_all()?;
+                            app.next();
+                        }
                         _ => {}
                     },
                     ViewMode::Gallery if app.gallery.search_active => match key.code {
@@ -292,6 +354,39 @@ fn render_fullscreen_image(app: &App) -> io::Result<()> {
             img,
             &encoder::kitty::DisplayOpts { id: None, cols: None, rows: None },
         )?;
+    }
+
+    out.flush()
+}
+
+#[cfg(feature = "video")]
+const VIDEO_IMAGE_ID: u32 = 900;
+
+#[cfg(feature = "video")]
+fn render_video_frame(app: &App) -> io::Result<()> {
+    use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+
+    let mut out = io::stdout().lock();
+
+    if let Some(ref v) = app.video {
+        if let Some(ref img) = v.current_frame {
+            let (cpw, cph) = app.cell_px;
+            let img_cols = (img.width() + cpw - 1) / cpw;
+            let img_rows = (img.height() + cph - 1) / cph;
+            let offset_x =
+                app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
+            let offset_y =
+                app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
+
+            queue!(out, BeginSynchronizedUpdate)?;
+            queue!(out, cursor::MoveTo(offset_x, offset_y))?;
+            encoder::kitty::encode_png_to(
+                &mut out,
+                img,
+                &encoder::kitty::DisplayOpts { id: Some(VIDEO_IMAGE_ID), cols: None, rows: None },
+            )?;
+            queue!(out, EndSynchronizedUpdate)?;
+        }
     }
 
     out.flush()

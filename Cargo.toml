@@ -15,10 +15,12 @@ lru = "0.12"
 rayon = "1"
 turbojpeg = { version = "1", optional = true }
 fast_image_resize = "6.0.0"
+ffmpeg = { version = "8", optional = true, package = "ffmpeg-next" }
 
 [features]
 default = ["turbo"]
 turbo = ["dep:turbojpeg"]
+video = ["dep:ffmpeg"]
 
 [profile.dev.package."*"]
 opt-level = 2

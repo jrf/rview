@@ -9,6 +9,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.mode {
         ViewMode::Gallery => draw_gallery(frame, app),
         ViewMode::Fullscreen => draw_fullscreen(frame, app),
+        #[cfg(feature = "video")]
+        ViewMode::Video => draw_video(frame, app),
     }
     if app.help_visible {
         draw_help_popup(frame, app);
@@ -45,6 +47,69 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
             ),
             Span::styled(
                 " Esc: gallery  \u{2190}/\u{2192}: navigate  ?: help  q: quit ",
+                theme.popup_desc,
+            ),
+        ])
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border)
+        .title(Line::from(Span::styled(
+            format!(" {} ", filename),
+            theme.title,
+        )))
+        .title_bottom(bottom_line);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    app.image_rect = inner;
+}
+
+#[cfg(feature = "video")]
+fn draw_video(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let filename = app
+        .current_path()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let (status, pts, duration, fps) = match &app.video {
+        Some(v) => {
+            let status = if v.playing { "\u{25b6}" } else { "\u{23f8}" };
+            (status, v.current_pts, v.duration, v.fps)
+        }
+        None => ("\u{25b6}", 0.0, 0.0, 0.0),
+    };
+
+    let fmt_time = |secs: f64| -> String {
+        let s = secs as u64;
+        format!("{:02}:{:02}", s / 60, s % 60)
+    };
+
+    let bottom_line = if let Some(ref err) = app.error {
+        Line::from(Span::styled(format!(" Error: {err} "), theme.status_bar_error))
+    } else {
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    " {} {} {}/{} [{:.0}fps] [{}/{}] ",
+                    status,
+                    filename,
+                    fmt_time(pts),
+                    fmt_time(duration),
+                    fps,
+                    app.current + 1,
+                    app.images.len(),
+                ),
+                theme.popup_text,
+            ),
+            Span::styled(
+                " Space: pause  Esc: gallery  \u{2190}/\u{2192}: navigate  q: quit ",
                 theme.popup_desc,
             ),
         ])

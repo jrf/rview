@@ -15,6 +15,8 @@ use std::sync::mpsc;
 pub enum ViewMode {
     Gallery,
     Fullscreen,
+    #[cfg(feature = "video")]
+    Video,
 }
 
 pub struct App {
@@ -41,6 +43,9 @@ pub struct App {
     // Async fullscreen decode
     fullscreen_rx: Option<mpsc::Receiver<io::Result<RgbaImage>>>,
     fullscreen_target: Option<(usize, Rect)>,
+
+    #[cfg(feature = "video")]
+    pub video: Option<crate::video::VideoPlayback>,
 
     // Scanner state
     shared_list: SharedImageList,
@@ -78,6 +83,8 @@ impl App {
             loaded_for_rect: Rect::default(),
             fullscreen_rx: None,
             fullscreen_target: None,
+            #[cfg(feature = "video")]
+            video: None,
             shared_list,
             known_len: 0,
             scan_complete: false,
@@ -157,6 +164,11 @@ impl App {
 
     pub fn enter_fullscreen_selected(&mut self) {
         if let Some(idx) = self.gallery.selected_index() {
+            #[cfg(feature = "video")]
+            if crate::video::is_video(&self.images[idx]) {
+                self.enter_video(idx);
+                return;
+            }
             self.current = idx;
             self.mode = ViewMode::Fullscreen;
             self.error = None;
@@ -165,6 +177,40 @@ impl App {
             self.fullscreen_target = None;
             self.loaded = None;
         }
+    }
+
+    #[cfg(feature = "video")]
+    pub fn enter_video(&mut self, idx: usize) {
+        self.current = idx;
+        self.mode = ViewMode::Video;
+        self.error = None;
+        self.needs_render = true;
+        self.loaded = None;
+        self.video = None;
+    }
+
+    #[cfg(feature = "video")]
+    pub fn open_video_if_needed(&mut self) {
+        if self.video.is_some() {
+            return;
+        }
+        let path = &self.images[self.current];
+        match crate::video::VideoPlayback::open(path, self.image_rect, self.cell_px) {
+            Ok(v) => self.video = Some(v),
+            Err(e) => {
+                self.error = Some(e.to_string());
+                self.mode = ViewMode::Fullscreen;
+            }
+        }
+    }
+
+    #[cfg(feature = "video")]
+    pub fn exit_video(&mut self) {
+        if let Some(mut v) = self.video.take() {
+            v.stop();
+        }
+        self.mode = ViewMode::Gallery;
+        self.needs_render = true;
     }
 
     fn start_fullscreen_decode(&mut self, idx: usize, rect: Rect) {
@@ -212,12 +258,25 @@ impl App {
 
     pub fn next(&mut self) {
         if self.current + 1 < self.images.len() {
+            #[cfg(feature = "video")]
+            if let Some(mut v) = self.video.take() {
+                v.stop();
+            }
+
             self.current += 1;
             self.error = None;
             self.needs_render = true;
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
 
+            #[cfg(feature = "video")]
+            if crate::video::is_video(&self.images[self.current]) {
+                self.mode = ViewMode::Video;
+                self.loaded = None;
+                return;
+            }
+
+            self.mode = ViewMode::Fullscreen;
             if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
                 self.loaded = Some(img);
                 self.loaded_for_rect = self.image_rect;
@@ -230,12 +289,25 @@ impl App {
 
     pub fn prev(&mut self) {
         if self.current > 0 {
+            #[cfg(feature = "video")]
+            if let Some(mut v) = self.video.take() {
+                v.stop();
+            }
+
             self.current -= 1;
             self.error = None;
             self.needs_render = true;
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
 
+            #[cfg(feature = "video")]
+            if crate::video::is_video(&self.images[self.current]) {
+                self.mode = ViewMode::Video;
+                self.loaded = None;
+                return;
+            }
+
+            self.mode = ViewMode::Fullscreen;
             if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
                 self.loaded = Some(img);
                 self.loaded_for_rect = self.image_rect;
@@ -267,6 +339,13 @@ impl App {
         let cell_px = self.cell_px;
         let generation = self.thumb_generation;
         rayon::spawn(move || {
+            #[cfg(feature = "video")]
+            if crate::video::is_video(&path) {
+                if let Ok(img) = crate::video::decode_first_frame(&path, rect, cell_px) {
+                    let _ = tx.send((generation, img_idx, img));
+                }
+                return;
+            }
             if let Ok(img) = load_and_resize(&path, rect, cell_px) {
                 let _ = tx.send((generation, img_idx, img));
             }

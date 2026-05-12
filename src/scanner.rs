@@ -8,10 +8,21 @@ const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "ico", "avif",
 ];
 
-fn is_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+#[cfg(feature = "video")]
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v"];
+
+fn is_supported(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str());
+    let Some(ext) = ext else { return false };
+    let ext = ext.to_ascii_lowercase();
+    if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return true;
+    }
+    #[cfg(feature = "video")]
+    if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
+        return true;
+    }
+    false
 }
 
 pub fn spawn(paths: Vec<PathBuf>, list: SharedImageList) {
@@ -48,7 +59,7 @@ fn scan_dir(dir: &Path, list: &SharedImageList, batch: &mut Vec<PathBuf>) {
             continue;
         }
         let path = entry.path();
-        if !is_image(&path) {
+        if !is_supported(&path) {
             continue;
         }
         batch.push(path);
