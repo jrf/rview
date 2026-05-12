@@ -83,15 +83,17 @@ impl App {
             }
 
             self.known_len = new_len;
-            self.needs_render = true;
+            if old_len == 0 {
+                self.needs_render = true;
+            }
         }
 
         if !self.scan_complete && self.shared_list.is_complete() {
             self.scan_complete = true;
-            self.needs_render = true;
 
             if self.images.len() == 1 && self.mode == ViewMode::Gallery {
                 self.mode = ViewMode::Fullscreen;
+                self.needs_render = true;
             }
         }
     }
