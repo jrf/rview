@@ -288,7 +288,7 @@ fn emit_new_thumbnails(app: &App, new_indices: &[usize]) -> io::Result<()> {
         let cell_rect = app.gallery.cell_rect(vis_idx);
         if let Some((img, id)) = app.thumb_cache.peek(img_idx) {
             queue!(out, cursor::MoveTo(cell_rect.x + 1, cell_rect.y + 1))?;
-            encoder::kitty::encode_with_opts(
+            encoder::kitty::encode_png_to(
                 &mut out,
                 img,
                 &encoder::kitty::DisplayOpts {
@@ -326,7 +326,7 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
             let inner_x = cell_rect.x + 1;
             let inner_y = cell_rect.y + 1;
             queue!(out, cursor::MoveTo(inner_x, inner_y))?;
-            encoder::kitty::encode_with_opts(
+            encoder::kitty::encode_png_to(
                 &mut out,
                 img,
                 &encoder::kitty::DisplayOpts {
