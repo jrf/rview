@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -38,6 +39,13 @@ pub struct App {
     pub help_visible: bool,
     loaded_for_rect: Rect,
 
+    // Async fullscreen decode
+    fullscreen_rx: Option<mpsc::Receiver<io::Result<RgbaImage>>>,
+    fullscreen_target: Option<(usize, Rect)>,
+
+    // Gallery hover pre-decode
+    hover_slot: Arc<Mutex<Option<HoverSlot>>>,
+
     // Scanner state
     shared_list: SharedImageList,
     known_len: usize,
@@ -51,6 +59,11 @@ pub struct App {
     thumb_rx: mpsc::Receiver<(u32, usize, RgbaImage)>,
     thumb_loading: HashSet<usize>,
     thumb_generation: u32,
+}
+
+struct HoverSlot {
+    index: usize,
+    image: Option<RgbaImage>,
 }
 
 impl App {
@@ -72,6 +85,9 @@ impl App {
             image_rect: Rect::default(),
             help_visible: false,
             loaded_for_rect: Rect::default(),
+            fullscreen_rx: None,
+            fullscreen_target: None,
+            hover_slot: Arc::new(Mutex::new(None)),
             shared_list,
             known_len: 0,
             scan_complete: false,
@@ -153,10 +169,106 @@ impl App {
         if let Some(idx) = self.gallery.selected_index() {
             self.current = idx;
             self.mode = ViewMode::Fullscreen;
-            self.loaded = None;
             self.error = None;
             self.needs_render = true;
+
+            // Try hover pre-decode first
+            let hover_img = {
+                let mut slot = self.hover_slot.lock().unwrap();
+                match slot.as_mut() {
+                    Some(s) if s.index == idx => s.image.take(),
+                    _ => None,
+                }
+            };
+
+            if let Some(img) = hover_img {
+                self.loaded = Some(img);
+                self.loaded_for_rect = Rect::default();
+            } else if let Some((thumb, _)) = self.thumb_cache.peek(idx) {
+                // Show thumbnail as placeholder
+                self.loaded = Some(thumb.clone());
+                self.loaded_for_rect = Rect::default();
+            } else {
+                self.loaded = None;
+            }
+
+            // Kick off async full-res decode
+            self.start_fullscreen_decode(idx);
         }
+    }
+
+    fn start_fullscreen_decode(&mut self, idx: usize) {
+        let (tx, rx) = mpsc::channel();
+        self.fullscreen_rx = Some(rx);
+        self.fullscreen_target = Some((idx, self.image_rect));
+        let path = self.images[idx].clone();
+        let rect = self.image_rect;
+        let cell_px = self.cell_px;
+        rayon::spawn(move || {
+            let result = load_and_resize(&path, rect, cell_px);
+            let _ = tx.send(result);
+        });
+    }
+
+    pub fn poll_fullscreen(&mut self) -> bool {
+        let result = self.fullscreen_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = result {
+            if let Some((idx, _rect)) = self.fullscreen_target {
+                if idx == self.current && self.mode == ViewMode::Fullscreen {
+                    match result {
+                        Ok(img) => {
+                            self.loaded = Some(img);
+                            self.error = None;
+                            self.loaded_for_rect = self.image_rect;
+                            self.needs_render = true;
+                        }
+                        Err(e) => {
+                            self.error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            self.fullscreen_rx = None;
+            self.fullscreen_target = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn pre_decode_hovered(&mut self) {
+        let idx = match self.gallery.selected_index() {
+            Some(i) => i,
+            None => return,
+        };
+
+        {
+            let slot = self.hover_slot.lock().unwrap();
+            if let Some(ref s) = *slot {
+                if s.index == idx {
+                    return;
+                }
+            }
+        }
+
+        {
+            let mut slot = self.hover_slot.lock().unwrap();
+            *slot = Some(HoverSlot { index: idx, image: None });
+        }
+
+        let hover_slot = Arc::clone(&self.hover_slot);
+        let path = self.images[idx].clone();
+        let image_rect = self.image_rect;
+        let cell_px = self.cell_px;
+        rayon::spawn(move || {
+            if let Ok(img) = load_and_resize(&path, image_rect, cell_px) {
+                let mut slot = hover_slot.lock().unwrap();
+                if let Some(ref mut s) = *slot {
+                    if s.index == idx {
+                        s.image = Some(img);
+                    }
+                }
+            }
+        });
     }
 
     pub fn enter_gallery(&mut self) {
@@ -168,18 +280,36 @@ impl App {
     pub fn next(&mut self) {
         if self.current + 1 < self.images.len() {
             self.current += 1;
-            self.loaded = None;
             self.error = None;
             self.needs_render = true;
+            self.fullscreen_rx = None;
+            self.fullscreen_target = None;
+
+            if let Some(img) = self.prefetcher.take(self.current, self.image_rect, self.cell_px) {
+                self.loaded = Some(img);
+                self.loaded_for_rect = self.image_rect;
+            } else {
+                self.loaded = None;
+                self.start_fullscreen_decode(self.current);
+            }
         }
     }
 
     pub fn prev(&mut self) {
         if self.current > 0 {
             self.current -= 1;
-            self.loaded = None;
             self.error = None;
             self.needs_render = true;
+            self.fullscreen_rx = None;
+            self.fullscreen_target = None;
+
+            if let Some(img) = self.prefetcher.take(self.current, self.image_rect, self.cell_px) {
+                self.loaded = Some(img);
+                self.loaded_for_rect = self.image_rect;
+            } else {
+                self.loaded = None;
+                self.start_fullscreen_decode(self.current);
+            }
         }
     }
 
@@ -219,30 +349,23 @@ impl App {
         self.needs_render = true;
     }
 
-    pub fn load_if_needed(&mut self) -> io::Result<()> {
+    pub fn load_if_needed(&mut self) {
         if self.loaded.is_some() && self.loaded_for_rect == self.image_rect {
-            return Ok(());
+            return;
         }
 
         if let Some(img) = self.prefetcher.take(self.current, self.image_rect, self.cell_px) {
             self.loaded = Some(img);
             self.error = None;
             self.loaded_for_rect = self.image_rect;
-            return Ok(());
+            return;
         }
 
-        match load_and_resize(&self.images[self.current], self.image_rect, self.cell_px) {
-            Ok(img) => {
-                self.loaded = Some(img);
-                self.error = None;
-                self.loaded_for_rect = self.image_rect;
-            }
-            Err(e) => {
-                self.loaded = None;
-                self.error = Some(e.to_string());
-            }
+        if self.fullscreen_rx.is_some() {
+            return;
         }
-        Ok(())
+
+        self.start_fullscreen_decode(self.current);
     }
 }
 

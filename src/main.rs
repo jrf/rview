@@ -12,7 +12,7 @@ use app::{App, ViewMode};
 use clap::Parser;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute, queue,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -109,6 +109,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         // 2. Poll background tasks
         app.refresh_from_scanner();
         app.poll_filter();
+        app.poll_fullscreen();
         pending_emits.extend(app.poll_thumbnails());
 
         if app.scan_complete && app.images.is_empty() {
@@ -122,7 +123,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         if app.needs_render && !app.images.is_empty() {
             match app.mode {
                 ViewMode::Fullscreen => {
-                    app.load_if_needed()?;
+                    app.load_if_needed();
                     render_fullscreen_image(app)?;
                     app.prefetcher.kick(app.current, &app.images, app.image_rect, app.cell_px);
                 }
@@ -189,49 +190,60 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         }
                         _ => {}
                     },
-                    ViewMode::Gallery => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
-                        KeyCode::Char('?') => {
-                            encoder::kitty::delete_all()?;
-                            app.help_visible = true;
-                        }
-                        KeyCode::Char('/') => {
-                            app.gallery.search_active = true;
-                        }
-                        KeyCode::Enter => {
-                            encoder::kitty::delete_all()?;
-                            app.enter_fullscreen_selected();
-                        }
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            let prev_offset = app.gallery.scroll_offset;
-                            app.gallery.move_left();
-                            if app.gallery.scroll_offset != prev_offset {
-                                app.needs_render = true;
+                    ViewMode::Gallery => {
+                        let prev_offset = app.gallery.scroll_offset;
+                        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+                            KeyCode::Char('?') => {
+                                encoder::kitty::delete_all()?;
+                                app.help_visible = true;
                             }
-                        }
-                        KeyCode::Right | KeyCode::Char('l') => {
-                            let prev_offset = app.gallery.scroll_offset;
-                            app.gallery.move_right();
-                            if app.gallery.scroll_offset != prev_offset {
-                                app.needs_render = true;
+                            KeyCode::Char('/') => {
+                                app.gallery.search_active = true;
                             }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            let prev_offset = app.gallery.scroll_offset;
-                            app.gallery.move_up();
-                            if app.gallery.scroll_offset != prev_offset {
-                                app.needs_render = true;
+                            KeyCode::Enter => {
+                                encoder::kitty::delete_all()?;
+                                app.enter_fullscreen_selected();
                             }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let prev_offset = app.gallery.scroll_offset;
-                            app.gallery.move_down();
-                            if app.gallery.scroll_offset != prev_offset {
-                                app.needs_render = true;
+                            KeyCode::Left | KeyCode::Char('h') => {
+                                app.gallery.move_left();
+                                app.pre_decode_hovered();
                             }
+                            KeyCode::Right | KeyCode::Char('l') => {
+                                app.gallery.move_right();
+                                app.pre_decode_hovered();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.gallery.move_up();
+                                app.pre_decode_hovered();
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.gallery.move_down();
+                                app.pre_decode_hovered();
+                            }
+                            KeyCode::PageUp | KeyCode::Char('b') if ctrl || matches!(key.code, KeyCode::PageUp) => {
+                                app.gallery.move_page_up();
+                                app.pre_decode_hovered();
+                            }
+                            KeyCode::PageDown | KeyCode::Char('f') if ctrl || matches!(key.code, KeyCode::PageDown) => {
+                                app.gallery.move_page_down();
+                                app.pre_decode_hovered();
+                            }
+                            KeyCode::Char('g') => {
+                                app.gallery.move_to_first();
+                                app.pre_decode_hovered();
+                            }
+                            KeyCode::Char('G') => {
+                                app.gallery.move_to_last();
+                                app.pre_decode_hovered();
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    },
+                        if app.gallery.scroll_offset != prev_offset {
+                            app.needs_render = true;
+                        }
+                    }
                 }
             }
         }

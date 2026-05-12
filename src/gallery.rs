@@ -92,6 +92,25 @@ impl GalleryState {
         }
     }
 
+    pub fn move_page_up(&mut self) {
+        let jump = self.visible_rows * self.grid_cols;
+        self.move_cursor_to(self.cursor.saturating_sub(jump));
+    }
+
+    pub fn move_page_down(&mut self) {
+        let jump = self.visible_rows * self.grid_cols;
+        self.move_cursor_to(self.cursor + jump);
+    }
+
+    pub fn move_to_first(&mut self) {
+        self.move_cursor_to(0);
+    }
+
+    pub fn move_to_last(&mut self) {
+        let last = self.filtered_indices.len().saturating_sub(1);
+        self.move_cursor_to(last);
+    }
+
     pub fn visible_items(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         let start = self.scroll_offset * self.grid_cols;
         let count = self.visible_rows * self.grid_cols;
