@@ -99,6 +99,7 @@ fn main() -> io::Result<()> {
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         app.refresh_from_scanner();
+        app.poll_filter();
 
         if app.scan_complete && app.images.is_empty() {
             return Ok(());

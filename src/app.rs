@@ -1,13 +1,14 @@
 use crate::gallery::{GalleryState, ThumbnailCache};
 use crate::image_list::SharedImageList;
 use crate::prefetch::Prefetcher;
-use crate::search::Search;
+use crate::search;
 use crate::theme::Theme;
 use fast_image_resize as fir;
 use image::{DynamicImage, ImageReader, RgbaImage};
 use ratatui::layout::Rect;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -25,7 +26,6 @@ pub struct App {
     // Gallery state
     pub gallery: GalleryState,
     pub thumb_cache: ThumbnailCache,
-    pub search: Search,
 
     // Fullscreen state
     pub current: usize,
@@ -41,6 +41,9 @@ pub struct App {
     shared_list: SharedImageList,
     known_len: usize,
     pub scan_complete: bool,
+
+    // Async filter
+    filter_rx: Option<mpsc::Receiver<Vec<usize>>>,
 }
 
 impl App {
@@ -53,7 +56,6 @@ impl App {
             cell_px,
             gallery: GalleryState::new(0),
             thumb_cache: ThumbnailCache::new(),
-            search: Search::new(),
             current: 0,
             prefetcher: Prefetcher::new(),
             loaded: None,
@@ -65,6 +67,7 @@ impl App {
             shared_list,
             known_len: 0,
             scan_complete: false,
+            filter_rx: None,
         }
     }
 
@@ -78,8 +81,6 @@ impl App {
 
             if self.gallery.search_query.is_empty() {
                 self.gallery.filtered_indices.extend(old_len..self.images.len());
-            } else {
-                self.update_filter();
             }
 
             self.known_len = new_len;
@@ -103,10 +104,33 @@ impl App {
     }
 
     pub fn update_filter(&mut self) {
-        let results = self.search.filter(&self.gallery.search_query, &self.filenames);
-        self.gallery.filtered_indices = results;
-        self.gallery.reset_cursor();
-        self.needs_render = true;
+        if self.gallery.search_query.is_empty() {
+            self.gallery.filtered_indices = (0..self.images.len()).collect();
+            self.gallery.reset_cursor();
+            self.needs_render = true;
+            self.filter_rx = None;
+            return;
+        }
+
+        let query = self.gallery.search_query.clone();
+        let filenames = self.filenames.clone();
+        let (tx, rx) = mpsc::channel();
+        self.filter_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let results = search::filter(&query, &filenames);
+            let _ = tx.send(results);
+        });
+    }
+
+    pub fn poll_filter(&mut self) {
+        let results = self.filter_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(results) = results {
+            self.gallery.filtered_indices = results;
+            self.gallery.reset_cursor();
+            self.needs_render = true;
+            self.filter_rx = None;
+        }
     }
 
     pub fn current_path(&self) -> &Path {
