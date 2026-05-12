@@ -10,6 +10,18 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 ratatui = "0.29"
 base64 = "0.22"
+nucleo-matcher = "0.3"
+lru = "0.12"
+rayon = "1"
+turbojpeg = { version = "1", optional = true }
+fast_image_resize = "6.0.0"
+
+[features]
+default = ["turbo"]
+turbo = ["dep:turbojpeg"]
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 3
