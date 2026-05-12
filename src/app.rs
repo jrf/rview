@@ -163,13 +163,7 @@ impl App {
             self.needs_render = true;
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
-
-            if let Some((thumb, _)) = self.thumb_cache.peek(idx) {
-                self.loaded = Some(thumb.clone());
-                self.loaded_for_rect = Rect::default();
-            } else {
-                self.loaded = None;
-            }
+            self.loaded = None;
         }
     }
 
@@ -224,7 +218,7 @@ impl App {
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
 
-            if let Some(img) = self.prefetcher.take(self.current, self.image_rect, self.cell_px) {
+            if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
                 self.loaded = Some(img);
                 self.loaded_for_rect = self.image_rect;
             } else {
@@ -242,7 +236,7 @@ impl App {
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
 
-            if let Some(img) = self.prefetcher.take(self.current, self.image_rect, self.cell_px) {
+            if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
                 self.loaded = Some(img);
                 self.loaded_for_rect = self.image_rect;
             } else {
@@ -279,6 +273,12 @@ impl App {
         });
     }
 
+    pub fn pre_decode_hovered(&mut self) {
+        if let Some(idx) = self.gallery.selected_index() {
+            self.prefetcher.kick_gallery(idx, &self.images);
+        }
+    }
+
     pub fn mark_dirty(&mut self) {
         self.loaded = None;
         self.thumb_cache.clear();
@@ -293,7 +293,7 @@ impl App {
             return;
         }
 
-        if let Some(img) = self.prefetcher.take(self.current, self.image_rect, self.cell_px) {
+        if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
             self.loaded = Some(img);
             self.error = None;
             self.loaded_for_rect = self.image_rect;
@@ -312,33 +312,37 @@ impl App {
 
 pub(crate) fn load_and_resize(path: &Path, rect: Rect, cell_px: (u32, u32)) -> io::Result<RgbaImage> {
     let img = decode_image(path)?;
+    Ok(resize_decoded(&img, rect, cell_px))
+}
+
+pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)) -> RgbaImage {
     let max_w = rect.width as u32 * cell_px.0;
     let max_h = rect.height as u32 * cell_px.1;
     let (orig_w, orig_h) = (img.width(), img.height());
-    if max_w == 0 || max_h == 0 {
-        return Ok(img.to_rgba8());
+    if max_w == 0 || max_h == 0 || orig_w == 0 || orig_h == 0 {
+        return img.to_rgba8();
     }
     let scale = f64::min(max_w as f64 / orig_w as f64, max_h as f64 / orig_h as f64);
     if scale >= 1.0 {
-        return Ok(img.to_rgba8());
+        return img.to_rgba8();
     }
     let dst_w = ((orig_w as f64 * scale) as u32).max(1);
     let dst_h = ((orig_h as f64 * scale) as u32).max(1);
 
     let src_rgba = img.to_rgba8();
-    let src_image = fir::images::Image::from_vec_u8(orig_w, orig_h, src_rgba.into_raw(), fir::PixelType::U8x4)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let Ok(src_image) = fir::images::Image::from_vec_u8(orig_w, orig_h, src_rgba.into_raw(), fir::PixelType::U8x4) else {
+        return img.to_rgba8();
+    };
     let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x4);
     let mut resizer = fir::Resizer::new();
-    resizer
-        .resize(&src_image, &mut dst_image, None)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    if resizer.resize(&src_image, &mut dst_image, None).is_err() {
+        return img.to_rgba8();
+    }
 
-    RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid resized dimensions"))
+    RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec()).unwrap_or_else(|| img.to_rgba8())
 }
 
-fn decode_image(path: &Path) -> io::Result<DynamicImage> {
+pub(crate) fn decode_image(path: &Path) -> io::Result<DynamicImage> {
     #[cfg(feature = "turbo")]
     if is_jpeg(path) {
         if let Ok(img) = decode_jpeg_turbo(path) {

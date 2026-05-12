@@ -110,6 +110,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         app.refresh_from_scanner();
         app.poll_filter();
         app.poll_fullscreen();
+        app.prefetcher.poll();
         pending_emits.extend(app.poll_thumbnails());
 
         if app.scan_complete && app.images.is_empty() {
@@ -125,7 +126,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 ViewMode::Fullscreen => {
                     app.load_if_needed();
                     render_fullscreen_image(app)?;
-                    app.prefetcher.kick(app.current, &app.images, app.image_rect, app.cell_px);
+                    app.prefetcher.kick(app.current, &app.images);
                 }
                 ViewMode::Gallery => {
                     render_gallery_images(app)?;
@@ -208,35 +209,35 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             }
                             KeyCode::Left | KeyCode::Char('h') => {
                                 app.gallery.move_left();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::Right | KeyCode::Char('l') => {
                                 app.gallery.move_right();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
                                 app.gallery.move_up();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
                                 app.gallery.move_down();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::PageUp | KeyCode::Char('b') if ctrl || matches!(key.code, KeyCode::PageUp) => {
                                 app.gallery.move_page_up();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::PageDown | KeyCode::Char('f') if ctrl || matches!(key.code, KeyCode::PageDown) => {
                                 app.gallery.move_page_down();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::Char('g') => {
                                 app.gallery.move_to_first();
-    
+                                app.pre_decode_hovered();
                             }
                             KeyCode::Char('G') => {
                                 app.gallery.move_to_last();
-    
+                                app.pre_decode_hovered();
                             }
                             _ => {}
                         }

@@ -1,121 +1,71 @@
-use crate::app::load_and_resize;
-use image::RgbaImage;
+use crate::app::{decode_image, resize_decoded};
+use image::{DynamicImage, RgbaImage};
+use lru::LruCache;
 use ratatui::layout::Rect;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::thread;
+use std::sync::mpsc;
 
-struct Slot {
-    index: usize,
-    rect: Rect,
-    cell_px: (u32, u32),
-    image: Option<RgbaImage>,
-}
+const CACHE_CAPACITY: usize = 5;
 
 pub struct Prefetcher {
-    prev: Arc<Mutex<Option<Slot>>>,
-    next: Arc<Mutex<Option<Slot>>>,
+    cache: LruCache<usize, DynamicImage>,
+    rx: mpsc::Receiver<(usize, DynamicImage)>,
+    tx: mpsc::Sender<(usize, DynamicImage)>,
+    pending: std::collections::HashSet<usize>,
 }
-
-const WAIT_TIMEOUT: Duration = Duration::from_millis(1000);
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 impl Prefetcher {
     pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
         Self {
-            prev: Arc::new(Mutex::new(None)),
-            next: Arc::new(Mutex::new(None)),
+            cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
+            rx,
+            tx,
+            pending: std::collections::HashSet::new(),
         }
     }
 
-    pub fn kick(&self, current: usize, images: &[PathBuf], rect: Rect, cell_px: (u32, u32)) {
-        if rect.width == 0 || rect.height == 0 {
-            return;
+    pub fn poll(&mut self) {
+        while let Ok((idx, img)) = self.rx.try_recv() {
+            self.pending.remove(&idx);
+            self.cache.push(idx, img);
         }
+    }
 
+    pub fn take_resized(&mut self, index: usize, rect: Rect, cell_px: (u32, u32)) -> Option<RgbaImage> {
+        let img = self.cache.pop(&index)?;
+        Some(resize_decoded(&img, rect, cell_px))
+    }
+
+    pub fn kick(&mut self, current: usize, images: &[PathBuf]) {
         if current > 0 {
-            self.maybe_spawn(&self.prev, current - 1, images, rect, cell_px);
+            self.ensure_decoding(current - 1, images);
         }
         if current + 1 < images.len() {
-            self.maybe_spawn(&self.next, current + 1, images, rect, cell_px);
+            self.ensure_decoding(current + 1, images);
         }
     }
 
-    pub fn take(&self, index: usize, rect: Rect, cell_px: (u32, u32)) -> Option<RgbaImage> {
-        for slot_arc in [&self.prev, &self.next] {
-            {
-                let slot = slot_arc.lock().unwrap();
-                match slot.as_ref() {
-                    Some(s) if s.index == index && s.rect == rect && s.cell_px == cell_px => {}
-                    _ => continue,
-                }
-            }
-
-            let deadline = Instant::now() + WAIT_TIMEOUT;
-            loop {
-                {
-                    let mut slot = slot_arc.lock().unwrap();
-                    if let Some(ref mut s) = *slot {
-                        if s.index == index && s.rect == rect && s.cell_px == cell_px {
-                            if let Some(img) = s.image.take() {
-                                *slot = None;
-                                return Some(img);
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-        }
-        None
+    pub fn kick_gallery(&mut self, index: usize, images: &[PathBuf]) {
+        self.ensure_decoding(index, images);
     }
 
-    pub fn invalidate(&self) {
-        *self.prev.lock().unwrap() = None;
-        *self.next.lock().unwrap() = None;
+    pub fn invalidate(&mut self) {
+        self.cache.clear();
+        self.pending.clear();
     }
 
-    fn maybe_spawn(
-        &self,
-        slot_arc: &Arc<Mutex<Option<Slot>>>,
-        index: usize,
-        images: &[PathBuf],
-        rect: Rect,
-        cell_px: (u32, u32),
-    ) {
-        {
-            let slot = slot_arc.lock().unwrap();
-            if let Some(ref s) = *slot {
-                if s.index == index && s.rect == rect && s.cell_px == cell_px {
-                    return;
-                }
-            }
+    fn ensure_decoding(&mut self, index: usize, images: &[PathBuf]) {
+        if self.cache.contains(&index) || self.pending.contains(&index) {
+            return;
         }
-
-        *slot_arc.lock().unwrap() = Some(Slot {
-            index,
-            rect,
-            cell_px,
-            image: None,
-        });
-
-        let slot_arc = Arc::clone(slot_arc);
+        self.pending.insert(index);
+        let tx = self.tx.clone();
         let path = images[index].clone();
-        thread::spawn(move || {
-            let img = load_and_resize(&path, rect, cell_px).ok();
-            let mut slot = slot_arc.lock().unwrap();
-            if let Some(ref mut s) = *slot {
-                if s.index == index && s.rect == rect && s.cell_px == cell_px {
-                    s.image = img;
-                }
+        rayon::spawn(move || {
+            if let Ok(img) = decode_image(&path) {
+                let _ = tx.send((index, img));
             }
         });
     }
