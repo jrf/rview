@@ -7,6 +7,7 @@
 - [ ] Sixel protocol support #feature
 - [ ] Stdin piping support (`curl ... | rview -`) #feature
 - [ ] Animated GIF playback #feature
+- [ ] MP4 video playback via Kitty animation protocol (ffmpeg-next + frame streaming) #feature
 
 ## Later
 

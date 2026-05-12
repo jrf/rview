@@ -208,35 +208,35 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             }
                             KeyCode::Left | KeyCode::Char('h') => {
                                 app.gallery.move_left();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::Right | KeyCode::Char('l') => {
                                 app.gallery.move_right();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
                                 app.gallery.move_up();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
                                 app.gallery.move_down();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::PageUp | KeyCode::Char('b') if ctrl || matches!(key.code, KeyCode::PageUp) => {
                                 app.gallery.move_page_up();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::PageDown | KeyCode::Char('f') if ctrl || matches!(key.code, KeyCode::PageDown) => {
                                 app.gallery.move_page_down();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::Char('g') => {
                                 app.gallery.move_to_first();
-                                app.pre_decode_hovered();
+    
                             }
                             KeyCode::Char('G') => {
                                 app.gallery.move_to_last();
-                                app.pre_decode_hovered();
+    
                             }
                             _ => {}
                         }
