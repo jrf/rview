@@ -87,7 +87,7 @@ Encoder in `encoder/kitty.rs`. Uses PNG format (`f=100`) for all rendering (~5x 
 
 - **`app.rs`** — State machine, async task coordination, `decode_image_with_hint()` and `resize_decoded()` (public for prefetcher)
 - **`main.rs`** — Event loop, Kitty image rendering functions, terminal setup/teardown
-- **`gallery.rs`** — Grid layout math (fixed 20×9 cells), cursor/scroll, `ThumbnailCache` (LRU-200)
+- **`gallery.rs`** — Grid layout math (20col × 10row cells: 8 thumbnail + 1 label + 1 gap), cursor/scroll, `ThumbnailCache` (LRU-200)
 - **`prefetch.rs`** — Background image pre-decode with LRU-8 cache of raw `DynamicImage`
 - **`video.rs`** — Decode thread, frame pacing, first-frame extraction for thumbnails (cfg-gated)
 - **`image_list.rs`** — Lock-free length reads via `AtomicUsize`, `AtomicBool` for completion flag
