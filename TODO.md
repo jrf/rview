@@ -7,11 +7,10 @@
 - [ ] Sixel protocol support #feature
 - [ ] Stdin piping support (`curl ... | rview -`) #feature
 - [ ] Animated GIF playback #feature
-- [ ] MP4 video playback via Kitty animation protocol (ffmpeg-next + frame streaming) #feature
 
 ## Later
 
-- [ ] Remote URL support (`rview https://...`) #feature
+- [ ] Similar image search via embeddings (ort + ONNX Runtime, cosine similarity) #feature
 - [ ] Mouse-based pan/zoom in interactive mode #feature
 
 ## Done
@@ -31,3 +30,4 @@
 - [x] Parallel thumbnail loading with rayon #improvement
 - [x] turbojpeg fast path for JPEG decoding #improvement
 - [x] Optimized dev profile for dependencies #chore
+- [x] MP4 video playback via Kitty protocol (ffmpeg-next, 10fps, aspect-ratio-aware) #feature
