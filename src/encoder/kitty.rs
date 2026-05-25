@@ -14,14 +14,22 @@ pub struct DisplayOpts {
 
 pub fn encode_png_to<W: Write>(out: &mut W, img: &RgbaImage, opts: &DisplayOpts) -> io::Result<()> {
     let (w, h) = img.dimensions();
-    let mut png_buf = Vec::new();
-    PngEncoder::new_with_quality(&mut png_buf, CompressionType::Fast, FilterType::Sub)
-        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let b64 = STANDARD.encode(&png_buf);
+    let is_ssh = std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_CONNECTION").is_ok();
+
+    let b64 = if is_ssh {
+        let mut png_buf = Vec::new();
+        PngEncoder::new_with_quality(&mut png_buf, CompressionType::Fast, FilterType::Sub)
+            .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        STANDARD.encode(&png_buf)
+    } else {
+        STANDARD.encode(img.as_raw())
+    };
+
     let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK_SIZE).collect();
     let total = chunks.len();
+    let f_val = if is_ssh { 100 } else { 32 };
 
     for (i, chunk) in chunks.iter().enumerate() {
         let more = if i + 1 < total { 1 } else { 0 };
@@ -29,7 +37,10 @@ pub fn encode_png_to<W: Write>(out: &mut W, img: &RgbaImage, opts: &DisplayOpts)
             let id_part = opts.id.map(|id| format!(",i={id}")).unwrap_or_default();
             let cols_part = opts.cols.map(|c| format!(",c={c}")).unwrap_or_default();
             let rows_part = opts.rows.map(|r| format!(",r={r}")).unwrap_or_default();
-            write!(out, "\x1b_Ga=T,q=2,f=100,s={w},v={h}{id_part}{cols_part}{rows_part},m={more};")?;
+            write!(
+                out,
+                "\x1b_Ga=T,q=2,f={f_val},s={w},v={h}{id_part}{cols_part}{rows_part},m={more};"
+            )?;
         } else {
             write!(out, "\x1b_Gm={more};")?;
         }

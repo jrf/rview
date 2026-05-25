@@ -1,5 +1,5 @@
-use crate::app::{decode_image_with_hint, resize_decoded};
-use image::{DynamicImage, RgbaImage};
+use crate::app::{decode_image_with_hint, resize_decoded_to_dims};
+use image::RgbaImage;
 use lru::LruCache;
 use ratatui::layout::Rect;
 use std::num::NonZeroUsize;
@@ -10,9 +10,9 @@ const CACHE_CAPACITY: usize = 8;
 const PREFETCH_RADIUS: usize = 3;
 
 pub struct Prefetcher {
-    cache: LruCache<usize, DynamicImage>,
-    rx: mpsc::Receiver<(usize, DynamicImage)>,
-    tx: mpsc::Sender<(usize, DynamicImage)>,
+    cache: LruCache<usize, RgbaImage>,
+    rx: mpsc::Receiver<(usize, RgbaImage)>,
+    tx: mpsc::Sender<(usize, RgbaImage)>,
     pending: std::collections::HashSet<usize>,
     target_hint: Option<(u32, u32)>,
 }
@@ -44,9 +44,13 @@ impl Prefetcher {
         }
     }
 
-    pub fn take_resized(&mut self, index: usize, rect: Rect, cell_px: (u32, u32)) -> Option<RgbaImage> {
-        let img = self.cache.pop(&index)?;
-        Some(resize_decoded(&img, rect, cell_px))
+    pub fn take_resized(
+        &mut self,
+        index: usize,
+        _rect: Rect,
+        _cell_px: (u32, u32),
+    ) -> Option<RgbaImage> {
+        self.cache.pop(&index)
     }
 
     pub fn kick(&mut self, current: usize, images: &[PathBuf]) {
@@ -79,7 +83,12 @@ impl Prefetcher {
         let hint = self.target_hint;
         rayon::spawn(move || {
             if let Ok(img) = decode_image_with_hint(&path, hint) {
-                let _ = tx.send((index, img));
+                let final_img = if let Some((max_w, max_h)) = hint {
+                    resize_decoded_to_dims(&img, max_w, max_h)
+                } else {
+                    img.to_rgba8()
+                };
+                let _ = tx.send((index, final_img));
             }
         });
     }

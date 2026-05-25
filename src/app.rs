@@ -105,7 +105,9 @@ impl App {
             self.filenames.extend(new_filenames);
 
             if self.gallery.search_query.is_empty() {
-                self.gallery.filtered_indices.extend(old_len..self.images.len());
+                self.gallery
+                    .filtered_indices
+                    .extend(old_len..self.images.len());
             }
 
             self.known_len = new_len;
@@ -226,10 +228,16 @@ impl App {
     }
 
     pub fn poll_fullscreen(&mut self) -> bool {
-        let result = self.fullscreen_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        let result = self
+            .fullscreen_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
         if let Some(result) = result {
             if let Some((idx, rect)) = self.fullscreen_target {
-                if idx == self.current && rect == self.image_rect && self.mode == ViewMode::Fullscreen {
+                if idx == self.current
+                    && rect == self.image_rect
+                    && self.mode == ViewMode::Fullscreen
+                {
                     match result {
                         Ok(img) => {
                             self.loaded = Some(img);
@@ -277,7 +285,10 @@ impl App {
             }
 
             self.mode = ViewMode::Fullscreen;
-            if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
+            if let Some(img) =
+                self.prefetcher
+                    .take_resized(self.current, self.image_rect, self.cell_px)
+            {
                 self.loaded = Some(img);
                 self.loaded_for_rect = self.image_rect;
             } else {
@@ -308,7 +319,10 @@ impl App {
             }
 
             self.mode = ViewMode::Fullscreen;
-            if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
+            if let Some(img) =
+                self.prefetcher
+                    .take_resized(self.current, self.image_rect, self.cell_px)
+            {
                 self.loaded = Some(img);
                 self.loaded_for_rect = self.image_rect;
             } else {
@@ -339,14 +353,26 @@ impl App {
         let cell_px = self.cell_px;
         let generation = self.thumb_generation;
         rayon::spawn(move || {
-            #[cfg(feature = "video")]
-            if crate::video::is_video(&path) {
-                if let Ok(img) = crate::video::decode_first_frame(&path, rect, cell_px) {
-                    let _ = tx.send((generation, img_idx, img));
-                }
+            let target_w = rect.width as u32 * cell_px.0;
+            let target_h = rect.height as u32 * cell_px.1;
+
+            if let Some(img) = try_load_from_disk_cache(&path, target_w, target_h) {
+                let _ = tx.send((generation, img_idx, img));
                 return;
             }
-            if let Ok(img) = load_and_resize(&path, rect, cell_px) {
+
+            #[cfg(feature = "video")]
+            let res = if crate::video::is_video(&path) {
+                crate::video::decode_first_frame(&path, rect, cell_px)
+            } else {
+                load_and_resize(&path, rect, cell_px)
+            };
+
+            #[cfg(not(feature = "video"))]
+            let res = load_and_resize(&path, rect, cell_px);
+
+            if let Ok(img) = res {
+                try_save_to_disk_cache(&path, target_w, target_h, &img);
                 let _ = tx.send((generation, img_idx, img));
             }
         });
@@ -372,7 +398,10 @@ impl App {
             return;
         }
 
-        if let Some(img) = self.prefetcher.take_resized(self.current, self.image_rect, self.cell_px) {
+        if let Some(img) = self
+            .prefetcher
+            .take_resized(self.current, self.image_rect, self.cell_px)
+        {
             self.loaded = Some(img);
             self.error = None;
             self.loaded_for_rect = self.image_rect;
@@ -389,7 +418,11 @@ impl App {
     }
 }
 
-pub(crate) fn load_and_resize(path: &Path, rect: Rect, cell_px: (u32, u32)) -> io::Result<RgbaImage> {
+pub(crate) fn load_and_resize(
+    path: &Path,
+    rect: Rect,
+    cell_px: (u32, u32),
+) -> io::Result<RgbaImage> {
     let target_w = rect.width as u32 * cell_px.0;
     let target_h = rect.height as u32 * cell_px.1;
     let hint = if target_w > 0 && target_h > 0 {
@@ -401,9 +434,7 @@ pub(crate) fn load_and_resize(path: &Path, rect: Rect, cell_px: (u32, u32)) -> i
     Ok(resize_decoded(&img, rect, cell_px))
 }
 
-pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)) -> RgbaImage {
-    let max_w = rect.width as u32 * cell_px.0;
-    let max_h = rect.height as u32 * cell_px.1;
+pub(crate) fn resize_decoded_to_dims(img: &DynamicImage, max_w: u32, max_h: u32) -> RgbaImage {
     let (orig_w, orig_h) = (img.width(), img.height());
     if max_w == 0 || max_h == 0 || orig_w == 0 || orig_h == 0 {
         return img.to_rgba8();
@@ -416,7 +447,9 @@ pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)
     let dst_h = ((orig_h as f64 * scale) as u32).max(1);
 
     let src_rgba = img.to_rgba8();
-    let Ok(src_image) = fir::images::Image::from_vec_u8(orig_w, orig_h, src_rgba.into_raw(), fir::PixelType::U8x4) else {
+    let Ok(src_image) =
+        fir::images::Image::from_vec_u8(orig_w, orig_h, src_rgba.into_raw(), fir::PixelType::U8x4)
+    else {
         return img.to_rgba8();
     };
     let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x4);
@@ -428,7 +461,16 @@ pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)
     RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec()).unwrap_or_else(|| img.to_rgba8())
 }
 
-pub(crate) fn decode_image_with_hint(path: &Path, target: Option<(u32, u32)>) -> io::Result<DynamicImage> {
+pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)) -> RgbaImage {
+    let max_w = rect.width as u32 * cell_px.0;
+    let max_h = rect.height as u32 * cell_px.1;
+    resize_decoded_to_dims(img, max_w, max_h)
+}
+
+pub(crate) fn decode_image_with_hint(
+    path: &Path,
+    target: Option<(u32, u32)>,
+) -> io::Result<DynamicImage> {
     #[cfg(feature = "turbo")]
     if is_jpeg(path) {
         if let Ok(img) = decode_jpeg_turbo(path, target) {
@@ -452,7 +494,12 @@ fn is_jpeg(path: &Path) -> bool {
 }
 
 #[cfg(feature = "turbo")]
-fn pick_scaling_factor(orig_w: usize, orig_h: usize, target_w: u32, target_h: u32) -> turbojpeg::ScalingFactor {
+fn pick_scaling_factor(
+    orig_w: usize,
+    orig_h: usize,
+    target_w: u32,
+    target_h: u32,
+) -> turbojpeg::ScalingFactor {
     let candidates = [
         turbojpeg::ScalingFactor::ONE_EIGHTH,
         turbojpeg::ScalingFactor::ONE_QUARTER,
@@ -477,7 +524,8 @@ fn decode_jpeg_turbo(path: &Path, target: Option<(u32, u32)>) -> io::Result<Dyna
     let mut decompressor = turbojpeg::Decompressor::new()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let header = decompressor.read_header(&data)
+    let header = decompressor
+        .read_header(&data)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let scaling = match target {
@@ -488,7 +536,8 @@ fn decode_jpeg_turbo(path: &Path, target: Option<(u32, u32)>) -> io::Result<Dyna
     };
 
     if scaling != turbojpeg::ScalingFactor::ONE {
-        decompressor.set_scaling_factor(scaling)
+        decompressor
+            .set_scaling_factor(scaling)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     }
 
@@ -502,7 +551,8 @@ fn decode_jpeg_turbo(path: &Path, target: Option<(u32, u32)>) -> io::Result<Dyna
         format: turbojpeg::PixelFormat::RGBA,
     };
 
-    decompressor.decompress(&data, image.as_deref_mut())
+    decompressor
+        .decompress(&data, image.as_deref_mut())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let w = image.width as u32;
@@ -510,4 +560,55 @@ fn decode_jpeg_turbo(path: &Path, target: Option<(u32, u32)>) -> io::Result<Dyna
     RgbaImage::from_raw(w, h, image.pixels)
         .map(DynamicImage::ImageRgba8)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid image dimensions"))
+}
+
+fn get_cache_file_path(path: &Path, target_w: u32, target_h: u32) -> Option<PathBuf> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::fs;
+    use std::hash::{Hash, Hasher};
+
+    let metadata = fs::metadata(path).ok()?;
+    let mtime = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    mtime.hash(&mut hasher);
+    target_w.hash(&mut hasher);
+    target_h.hash(&mut hasher);
+    let filename = format!("{:016x}.png", hasher.finish());
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let mut cache_dir = PathBuf::from(home);
+    cache_dir.push(".cache");
+    cache_dir.push("rview");
+
+    Some(cache_dir.join(filename))
+}
+
+fn try_load_from_disk_cache(path: &Path, target_w: u32, target_h: u32) -> Option<RgbaImage> {
+    let cache_path = get_cache_file_path(path, target_w, target_h)?;
+    if cache_path.exists() {
+        image::open(&cache_path).ok().map(|img| img.to_rgba8())
+    } else {
+        None
+    }
+}
+
+fn try_save_to_disk_cache(
+    path: &Path,
+    target_w: u32,
+    target_h: u32,
+    img: &RgbaImage,
+) -> Option<()> {
+    use std::fs;
+    let cache_path = get_cache_file_path(path, target_w, target_h)?;
+    let parent = cache_path.parent()?;
+    fs::create_dir_all(parent).ok()?;
+    img.save(&cache_path).ok()?;
+    Some(())
 }

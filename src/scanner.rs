@@ -53,15 +53,27 @@ fn scan_dir(dir: &Path, list: &SharedImageList, batch: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let Ok(ft) = entry.file_type() else { continue };
-        if !ft.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if !is_supported(&path) {
-            continue;
-        }
+
+    let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+
+    use rayon::prelude::*;
+    let supported_paths: Vec<PathBuf> = entries
+        .into_par_iter()
+        .filter_map(|entry| {
+            let ft = entry.file_type().ok()?;
+            if !ft.is_file() {
+                return None;
+            }
+            let path = entry.path();
+            if is_supported(&path) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for path in supported_paths {
         batch.push(path);
         if batch.len() >= BATCH_SIZE {
             list.push_batch(std::mem::take(batch));
