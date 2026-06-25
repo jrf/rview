@@ -207,6 +207,14 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         }
                         KeyCode::Left | KeyCode::Char('h') => app.prev(),
                         KeyCode::Right | KeyCode::Char('l') => app.next(),
+                        KeyCode::Home => {
+                            encoder::kitty::delete_all()?;
+                            app.first();
+                        }
+                        KeyCode::End => {
+                            encoder::kitty::delete_all()?;
+                            app.last();
+                        }
                         _ => {}
                     },
                     #[cfg(feature = "video")]
@@ -233,6 +241,14 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         KeyCode::Right | KeyCode::Char('l') => {
                             encoder::kitty::delete_all()?;
                             app.next();
+                        }
+                        KeyCode::Home => {
+                            encoder::kitty::delete_all()?;
+                            app.first();
+                        }
+                        KeyCode::End => {
+                            encoder::kitty::delete_all()?;
+                            app.last();
                         }
                         _ => {}
                     },
@@ -294,11 +310,11 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                                 app.gallery.move_page_down();
                                 app.pre_decode_hovered();
                             }
-                            KeyCode::Char('g') => {
+                            KeyCode::Char('g') | KeyCode::Home => {
                                 app.gallery.move_to_first();
                                 app.pre_decode_hovered();
                             }
-                            KeyCode::Char('G') => {
+                            KeyCode::Char('G') | KeyCode::End => {
                                 app.gallery.move_to_last();
                                 app.pre_decode_hovered();
                             }

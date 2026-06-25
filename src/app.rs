@@ -266,69 +266,58 @@ impl App {
 
     pub fn next(&mut self) {
         if self.current + 1 < self.images.len() {
-            #[cfg(feature = "video")]
-            if let Some(mut v) = self.video.take() {
-                v.stop();
-            }
-
-            self.current += 1;
-            self.error = None;
-            self.needs_render = true;
-            self.fullscreen_rx = None;
-            self.fullscreen_target = None;
-
-            #[cfg(feature = "video")]
-            if crate::video::is_video(&self.images[self.current]) {
-                self.mode = ViewMode::Video;
-                self.loaded = None;
-                return;
-            }
-
-            self.mode = ViewMode::Fullscreen;
-            if let Some(img) =
-                self.prefetcher
-                    .take_resized(self.current, self.image_rect, self.cell_px)
-            {
-                self.loaded = Some(img);
-                self.loaded_for_rect = self.image_rect;
-            } else {
-                self.loaded = None;
-                self.start_fullscreen_decode(self.current, self.image_rect);
-            }
+            self.jump_to(self.current + 1);
         }
     }
 
     pub fn prev(&mut self) {
         if self.current > 0 {
-            #[cfg(feature = "video")]
-            if let Some(mut v) = self.video.take() {
-                v.stop();
-            }
+            self.jump_to(self.current - 1);
+        }
+    }
 
-            self.current -= 1;
-            self.error = None;
-            self.needs_render = true;
-            self.fullscreen_rx = None;
-            self.fullscreen_target = None;
+    pub fn first(&mut self) {
+        if !self.images.is_empty() && self.current != 0 {
+            self.jump_to(0);
+        }
+    }
 
-            #[cfg(feature = "video")]
-            if crate::video::is_video(&self.images[self.current]) {
-                self.mode = ViewMode::Video;
-                self.loaded = None;
-                return;
-            }
+    pub fn last(&mut self) {
+        let last = self.images.len().saturating_sub(1);
+        if !self.images.is_empty() && self.current != last {
+            self.jump_to(last);
+        }
+    }
 
-            self.mode = ViewMode::Fullscreen;
-            if let Some(img) =
-                self.prefetcher
-                    .take_resized(self.current, self.image_rect, self.cell_px)
-            {
-                self.loaded = Some(img);
-                self.loaded_for_rect = self.image_rect;
-            } else {
-                self.loaded = None;
-                self.start_fullscreen_decode(self.current, self.image_rect);
-            }
+    fn jump_to(&mut self, target: usize) {
+        #[cfg(feature = "video")]
+        if let Some(mut v) = self.video.take() {
+            v.stop();
+        }
+
+        self.current = target;
+        self.error = None;
+        self.needs_render = true;
+        self.fullscreen_rx = None;
+        self.fullscreen_target = None;
+
+        #[cfg(feature = "video")]
+        if crate::video::is_video(&self.images[self.current]) {
+            self.mode = ViewMode::Video;
+            self.loaded = None;
+            return;
+        }
+
+        self.mode = ViewMode::Fullscreen;
+        if let Some(img) =
+            self.prefetcher
+                .take_resized(self.current, self.image_rect, self.cell_px)
+        {
+            self.loaded = Some(img);
+            self.loaded_for_rect = self.image_rect;
+        } else {
+            self.loaded = None;
+            self.start_fullscreen_decode(self.current, self.image_rect);
         }
     }
 

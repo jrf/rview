@@ -285,6 +285,8 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
     let help_lines = [
         ("", "Gallery"),
         ("h/j/k/l", "Navigate grid"),
+        ("g / G", "Jump to first / last"),
+        ("Home / End", "Jump to first / last"),
         ("Enter", "Open fullscreen"),
         ("/", "Search"),
         ("?", "Toggle help"),
@@ -299,6 +301,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("", "Fullscreen"),
         ("\u{2190} / \u{2192}", "Previous / next image"),
         ("h / l", "Previous / next image"),
+        ("Home / End", "Jump to first / last"),
         ("Esc", "Back to gallery"),
         ("?", "Toggle help"),
         ("q", "Quit"),

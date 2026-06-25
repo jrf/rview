@@ -41,6 +41,7 @@ rview -t catppuccin ~/photos/      # choose theme
 | Key | Action |
 |-----|--------|
 | `h` `j` `k` `l` | Navigate grid |
+| `g` `G` `Home` `End` | Jump to first / last |
 | `Enter` | Open fullscreen |
 | `/` | Search filenames |
 | `?` | Help |
@@ -60,6 +61,7 @@ rview -t catppuccin ~/photos/      # choose theme
 | Key | Action |
 |-----|--------|
 | `h` `l` `←` `→` | Previous / next image |
+| `Home` `End` | Jump to first / last |
 | `Esc` | Back to gallery |
 | `?` | Help |
 | `q` | Quit |
