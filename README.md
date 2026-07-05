@@ -43,9 +43,25 @@ rview -t catppuccin ~/photos/      # choose theme
 | `h` `j` `k` `l` | Navigate grid |
 | `g` `G` `Home` `End` | Jump to first / last |
 | `Enter` | Open fullscreen |
+| `Space` | Toggle selection at cursor |
+| `a` `A` | Select all filtered / clear selection |
+| `d` | Delete selection (or cursor image), with confirm |
+| `o` | Open directory picker |
 | `/` | Search filenames |
 | `?` | Help |
 | `q` `Esc` | Quit |
+
+### Directory Picker
+
+| Key | Action |
+|-----|--------|
+| `j` `k` `↑` `↓` | Move cursor |
+| `Enter` `l` `→` | Open highlighted directory |
+| `h` `←` | Go to parent directory |
+| `g` `G` `Home` `End` | First / last |
+| `/` | Filter directory names (fuzzy) |
+| `Esc` | Back to gallery |
+| `q` | Quit |
 
 ### Search
 
@@ -62,6 +78,7 @@ rview -t catppuccin ~/photos/      # choose theme
 |-----|--------|
 | `h` `l` `←` `→` | Previous / next image |
 | `Home` `End` | Jump to first / last |
+| `d` | Delete current image, with confirm |
 | `Esc` | Back to gallery |
 | `?` | Help |
 | `q` | Quit |

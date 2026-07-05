@@ -57,4 +57,11 @@ impl SharedImageList {
         let filenames = inner.filenames[known_len..].to_vec();
         (paths, filenames)
     }
+
+    pub fn replace_all(&self, paths: Vec<PathBuf>, filenames: Vec<String>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.paths = paths;
+        inner.filenames = filenames;
+        self.len.store(inner.paths.len(), Ordering::Release);
+    }
 }

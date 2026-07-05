@@ -6,6 +6,7 @@ pub struct Theme {
     // Borders
     pub border: Style,
     pub border_selected: Style,
+    pub border_marked: Style,
     pub title: Style,
 
     // Gallery
@@ -62,6 +63,7 @@ impl Theme {
         Self {
             border: Style::default().fg(comment),
             border_selected: Style::default().fg(blue).add_modifier(Modifier::BOLD),
+            border_marked: Style::default().fg(green).add_modifier(Modifier::BOLD),
             title: Style::default().fg(blue).add_modifier(Modifier::BOLD),
             label: Style::default().fg(fg_dark),
             label_selected: Style::default().fg(yellow),
@@ -84,6 +86,7 @@ impl Theme {
         Self {
             border: Style::default().fg(Color::DarkGray),
             border_selected: Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            border_marked: Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             title: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             label: Style::default().fg(Color::White),
             label_selected: Style::default().fg(Color::Yellow),
@@ -106,6 +109,7 @@ impl Theme {
         Self {
             border: Style::default().fg(Color::Gray),
             border_selected: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            border_marked: Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             title: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             label: Style::default().fg(Color::Black),
             label_selected: Style::default().fg(Color::Blue),
@@ -138,6 +142,7 @@ impl Theme {
         Self {
             border: Style::default().fg(overlay),
             border_selected: Style::default().fg(mauve).add_modifier(Modifier::BOLD),
+            border_marked: Style::default().fg(green).add_modifier(Modifier::BOLD),
             title: Style::default().fg(mauve).add_modifier(Modifier::BOLD),
             label: Style::default().fg(subtext),
             label_selected: Style::default().fg(mauve),
@@ -170,6 +175,7 @@ impl Theme {
         Self {
             border: Style::default().fg(polar3),
             border_selected: Style::default().fg(frost_blue).add_modifier(Modifier::BOLD),
+            border_marked: Style::default().fg(aurora_green).add_modifier(Modifier::BOLD),
             title: Style::default().fg(frost_blue).add_modifier(Modifier::BOLD),
             label: Style::default().fg(snow0),
             label_selected: Style::default().fg(frost_blue),

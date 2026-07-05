@@ -2,6 +2,7 @@ mod app;
 mod encoder;
 mod gallery;
 mod image_list;
+mod picker;
 mod prefetch;
 mod scanner;
 mod search;
@@ -92,7 +93,7 @@ fn main() -> io::Result<()> {
 
     result?;
 
-    if app.scan_complete && app.images.is_empty() {
+    if app.scan_complete && app.images.is_empty() && app.current_dir.is_none() {
         eprintln!("No image files found.");
         std::process::exit(1);
     }
@@ -125,7 +126,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             }
         }
 
-        if app.scan_complete && app.images.is_empty() {
+        if app.scan_complete
+            && app.images.is_empty()
+            && app.mode != ViewMode::Picker
+            && app.current_dir.is_none()
+        {
             return Ok(());
         }
 
@@ -133,7 +138,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         // 4. Render Kitty images
-        if app.needs_render && !app.images.is_empty() {
+        if app.mode == ViewMode::Picker {
+            app.needs_render = false;
+            pending_emits.clear();
+        } else if app.needs_render && !app.images.is_empty() {
             #[cfg(feature = "video")]
             let is_video = matches!(app.mode, ViewMode::Video);
             #[cfg(not(feature = "video"))]
@@ -149,6 +157,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 ViewMode::Gallery => {
                     render_gallery_images(app)?;
                 }
+                ViewMode::Picker => {}
                 #[cfg(feature = "video")]
                 ViewMode::Video => {
                     app.open_video_if_needed();
@@ -193,6 +202,20 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
             if app.help_visible {
                 app.help_visible = false;
                 app.needs_render = true;
+            } else if app.pending_delete.is_some() {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        encoder::kitty::delete_all()?;
+                        app.confirm_delete();
+                        if app.scan_complete && app.images.is_empty() {
+                            return Ok(true);
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.cancel_delete();
+                    }
+                    _ => {}
+                }
             } else {
                 match app.mode {
                     ViewMode::Fullscreen => match key.code {
@@ -214,6 +237,9 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         KeyCode::End => {
                             encoder::kitty::delete_all()?;
                             app.last();
+                        }
+                        KeyCode::Char('d') => {
+                            app.begin_delete();
                         }
                         _ => {}
                     },
@@ -250,6 +276,9 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             encoder::kitty::delete_all()?;
                             app.last();
                         }
+                        KeyCode::Char('d') => {
+                            app.begin_delete();
+                        }
                         _ => {}
                     },
                     ViewMode::Gallery if app.gallery.search_active => match key.code {
@@ -264,9 +293,11 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         }
                         KeyCode::Backspace => {
                             app.gallery.search_query.pop();
+                            app.update_filter();
                         }
                         KeyCode::Char(c) => {
                             app.gallery.search_query.push(c);
+                            app.update_filter();
                         }
                         _ => {}
                     },
@@ -318,16 +349,148 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                                 app.gallery.move_to_last();
                                 app.pre_decode_hovered();
                             }
+                            KeyCode::Char(' ') => {
+                                app.toggle_selection_at_cursor();
+                            }
+                            KeyCode::Char('a') => {
+                                app.select_all_filtered();
+                            }
+                            KeyCode::Char('A') => {
+                                app.clear_selection();
+                            }
+                            KeyCode::Char('d') => {
+                                encoder::kitty::delete_all()?;
+                                app.begin_delete();
+                            }
+                            KeyCode::Char('o') => {
+                                encoder::kitty::delete_all()?;
+                                app.open_picker();
+                            }
                             _ => {}
                         }
                         if app.gallery.scroll_offset != prev_offset {
                             app.needs_render = true;
                         }
                     }
+                    ViewMode::Picker => {
+                        if handle_picker_key(app, key.code)? {
+                            return Ok(true);
+                        }
+                    }
                 }
             }
         }
         Event::Resize(_, _) => app.mark_dirty(),
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
+    let filter_active = app
+        .picker
+        .as_ref()
+        .is_some_and(|p| p.filter_active);
+
+    if filter_active {
+        let Some(picker) = app.picker.as_mut() else {
+            return Ok(false);
+        };
+        match code {
+            KeyCode::Esc => {
+                picker.filter_active = false;
+                picker.filter.clear();
+                picker.rebuild_filter();
+                app.needs_render = true;
+            }
+            KeyCode::Enter => {
+                picker.filter_active = false;
+                app.needs_render = true;
+            }
+            KeyCode::Backspace => {
+                picker.filter.pop();
+                picker.rebuild_filter();
+                app.needs_render = true;
+            }
+            KeyCode::Char(c) => {
+                picker.filter.push(c);
+                picker.rebuild_filter();
+                app.needs_render = true;
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+
+    match code {
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Esc => app.close_picker(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(p) = app.picker.as_mut() {
+                p.move_up();
+                app.needs_render = true;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(p) = app.picker.as_mut() {
+                p.move_down();
+                app.needs_render = true;
+            }
+        }
+        KeyCode::Home | KeyCode::Char('g') => {
+            if let Some(p) = app.picker.as_mut() {
+                p.move_first();
+                app.needs_render = true;
+            }
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            if let Some(p) = app.picker.as_mut() {
+                p.move_last();
+                app.needs_render = true;
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(p) = app.picker.as_mut() {
+                p.move_page_up(10);
+                app.needs_render = true;
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(p) = app.picker.as_mut() {
+                p.move_page_down(10);
+                app.needs_render = true;
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            let target = app.picker.as_mut().and_then(|p| p.ascend());
+            if let Some(t) = target {
+                app.switch_to_dir(t);
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            let target = app.picker.as_mut().and_then(|p| {
+                let sel = p.selected()?;
+                if sel.is_parent {
+                    return p.ascend();
+                }
+                p.enter_selected()
+            });
+            if let Some(t) = target {
+                app.switch_to_dir(t);
+            }
+        }
+        KeyCode::Char('/') => {
+            if let Some(p) = app.picker.as_mut() {
+                p.filter_active = true;
+                p.filter.clear();
+                p.rebuild_filter();
+                app.needs_render = true;
+            }
+        }
+        KeyCode::Char('?') => {
+            app.help_visible = true;
+            app.needs_render = true;
+        }
         _ => {}
     }
     Ok(false)

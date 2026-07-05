@@ -15,6 +15,8 @@
 
 ## Done
 
+- [x] Directory picker (o) with fuzzy filter, switches gallery to chosen dir #feature
+- [x] Multi-select and permanent delete with confirm prompt (Space, a/A, d) #feature
 - [x] Large directory scaling (streaming background scanner, incremental display) #improvement
 - [x] Kitty graphics protocol encoding #feature
 - [x] CLI arg parsing with clap #feature

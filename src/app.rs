@@ -1,6 +1,8 @@
 use crate::gallery::{GalleryState, ThumbnailCache};
 use crate::image_list::SharedImageList;
+use crate::picker::{self, PickerState};
 use crate::prefetch::Prefetcher;
+use crate::scanner;
 use crate::search;
 use crate::theme::Theme;
 use fast_image_resize as fir;
@@ -15,8 +17,14 @@ use std::sync::mpsc;
 pub enum ViewMode {
     Gallery,
     Fullscreen,
+    Picker,
     #[cfg(feature = "video")]
     Video,
+}
+
+pub struct PendingDelete {
+    pub paths: Vec<PathBuf>,
+    pub from_fullscreen: bool,
 }
 
 pub struct App {
@@ -29,6 +37,13 @@ pub struct App {
     // Gallery state
     pub gallery: GalleryState,
     pub thumb_cache: ThumbnailCache,
+    pub selection: HashSet<PathBuf>,
+    pub pending_delete: Option<PendingDelete>,
+    pub delete_error: Option<String>,
+
+    // Directory picker state
+    pub picker: Option<PickerState>,
+    pub current_dir: Option<PathBuf>,
 
     // Fullscreen state
     pub current: usize,
@@ -73,6 +88,11 @@ impl App {
             cell_px,
             gallery: GalleryState::new(0),
             thumb_cache: ThumbnailCache::new(),
+            selection: HashSet::new(),
+            pending_delete: None,
+            delete_error: None,
+            picker: None,
+            current_dir: None,
             current: 0,
             prefetcher: Prefetcher::new(),
             loaded: None,
@@ -261,6 +281,233 @@ impl App {
     pub fn enter_gallery(&mut self) {
         self.mode = ViewMode::Gallery;
         self.loaded = None;
+        self.needs_render = true;
+    }
+
+    pub fn toggle_selection_at_cursor(&mut self) {
+        let Some(idx) = self.gallery.selected_index() else {
+            return;
+        };
+        let path = self.images[idx].clone();
+        if !self.selection.remove(&path) {
+            self.selection.insert(path);
+        }
+        self.needs_render = true;
+    }
+
+    pub fn select_all_filtered(&mut self) {
+        for &idx in &self.gallery.filtered_indices {
+            self.selection.insert(self.images[idx].clone());
+        }
+        self.needs_render = true;
+    }
+
+    pub fn clear_selection(&mut self) {
+        if !self.selection.is_empty() {
+            self.selection.clear();
+            self.needs_render = true;
+        }
+    }
+
+    pub fn is_marked(&self, img_idx: usize) -> bool {
+        self.images
+            .get(img_idx)
+            .is_some_and(|p| self.selection.contains(p))
+    }
+
+    pub fn begin_delete(&mut self) {
+        let from_fullscreen = matches!(self.mode, ViewMode::Fullscreen);
+        #[cfg(feature = "video")]
+        let from_fullscreen = from_fullscreen || matches!(self.mode, ViewMode::Video);
+
+        let paths: Vec<PathBuf> = if from_fullscreen {
+            if self.current >= self.images.len() {
+                return;
+            }
+            vec![self.images[self.current].clone()]
+        } else if !self.selection.is_empty() {
+            let mut v: Vec<PathBuf> = self
+                .gallery
+                .filtered_indices
+                .iter()
+                .filter_map(|&i| {
+                    let p = self.images.get(i)?;
+                    if self.selection.contains(p) {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if v.is_empty() {
+                v = self.selection.iter().cloned().collect();
+            }
+            v
+        } else if let Some(idx) = self.gallery.selected_index() {
+            vec![self.images[idx].clone()]
+        } else {
+            return;
+        };
+
+        if paths.is_empty() {
+            return;
+        }
+
+        self.pending_delete = Some(PendingDelete { paths, from_fullscreen });
+        self.delete_error = None;
+        self.needs_render = true;
+    }
+
+    pub fn cancel_delete(&mut self) {
+        if self.pending_delete.take().is_some() {
+            self.needs_render = true;
+        }
+    }
+
+    pub fn confirm_delete(&mut self) {
+        let Some(pending) = self.pending_delete.take() else {
+            return;
+        };
+
+        let mut removed: HashSet<PathBuf> = HashSet::new();
+        let mut errors: Vec<String> = Vec::new();
+        for p in &pending.paths {
+            match std::fs::remove_file(p) {
+                Ok(()) => {
+                    removed.insert(p.clone());
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", p.display(), e));
+                }
+            }
+        }
+
+        if removed.is_empty() {
+            self.delete_error = Some(errors.join("; "));
+            self.needs_render = true;
+            return;
+        }
+
+        let current_path = self.images.get(self.current).cloned();
+
+        let mut new_images = Vec::with_capacity(self.images.len() - removed.len());
+        let mut new_filenames = Vec::with_capacity(self.filenames.len() - removed.len());
+        for (i, p) in self.images.iter().enumerate() {
+            if !removed.contains(p) {
+                new_images.push(p.clone());
+                new_filenames.push(self.filenames[i].clone());
+            }
+        }
+
+        self.images = new_images;
+        self.filenames = new_filenames;
+        for p in &removed {
+            self.selection.remove(p);
+        }
+        self.known_len = self.images.len();
+        self.shared_list.replace_all(self.images.clone(), self.filenames.clone());
+
+        self.update_filter();
+        if self.gallery.search_query.is_empty() {
+            self.gallery.filtered_indices = (0..self.images.len()).collect();
+        }
+
+        let cursor = self.gallery.cursor;
+        let max_cursor = self.gallery.filtered_indices.len().saturating_sub(1);
+        self.gallery.cursor = cursor.min(max_cursor);
+        self.gallery.ensure_cursor_visible();
+
+        self.thumb_cache.clear();
+        self.thumb_loading.clear();
+        self.thumb_generation += 1;
+        self.prefetcher.invalidate();
+        self.fullscreen_rx = None;
+        self.fullscreen_target = None;
+        self.loaded = None;
+
+        self.delete_error = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        };
+
+        if pending.from_fullscreen {
+            if self.images.is_empty() {
+                self.mode = ViewMode::Gallery;
+            } else {
+                let old_current = current_path
+                    .as_ref()
+                    .and_then(|p| self.images.iter().position(|q| q == p));
+                let target = old_current.unwrap_or_else(|| self.current.min(self.images.len() - 1));
+                self.jump_to(target);
+            }
+        } else if self.images.is_empty() {
+            self.current = 0;
+        } else if self.current >= self.images.len() {
+            self.current = self.images.len() - 1;
+        }
+
+        self.needs_render = true;
+    }
+
+    pub fn open_picker(&mut self) {
+        let start = self
+            .current_dir
+            .clone()
+            .unwrap_or_else(|| picker::initial_picker_dir(&self.images));
+        self.current_dir = Some(start.clone());
+        self.picker = Some(PickerState::new(start));
+        self.mode = ViewMode::Picker;
+        self.needs_render = true;
+    }
+
+    pub fn close_picker(&mut self) {
+        self.picker = None;
+        self.mode = ViewMode::Gallery;
+        self.needs_render = true;
+    }
+
+    /// Replace image list with the contents of `dir` and reset all view state.
+    /// Spawns a fresh scanner thread; the previous scanner (if any) is orphaned
+    /// against an unused SharedImageList clone and will be dropped as it completes.
+    pub fn switch_to_dir(&mut self, dir: PathBuf) {
+        let canonical = picker::canonicalize_or_self(&dir);
+        self.current_dir = Some(canonical.clone());
+
+        let new_list = SharedImageList::new();
+        scanner::spawn(vec![canonical.clone()], new_list.clone());
+        self.shared_list = new_list;
+
+        self.images.clear();
+        self.filenames.clear();
+        self.known_len = 0;
+        self.scan_complete = false;
+        self.selection.clear();
+        self.pending_delete = None;
+        self.delete_error = None;
+
+        self.gallery.search_active = false;
+        self.gallery.search_query.clear();
+        self.gallery.filtered_indices.clear();
+        self.gallery.reset_cursor();
+        self.filter_rx = None;
+
+        self.current = 0;
+        self.thumb_cache.clear();
+        self.thumb_loading.clear();
+        self.thumb_generation += 1;
+        self.prefetcher.invalidate();
+        self.fullscreen_rx = None;
+        self.fullscreen_target = None;
+        self.loaded = None;
+        self.error = None;
+
+        if let Some(ref mut p) = self.picker {
+            p.current_dir = canonical;
+            p.load_dir();
+            p.adjust_scroll(p.filtered_indices.len().max(1));
+        }
+
         self.needs_render = true;
     }
 
