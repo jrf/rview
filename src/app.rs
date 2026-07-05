@@ -44,6 +44,7 @@ pub struct App {
     // Directory picker state
     pub picker: Option<PickerState>,
     pub current_dir: Option<PathBuf>,
+    pub initial_dir: Option<PathBuf>,
 
     // Fullscreen state
     pub current: usize,
@@ -93,6 +94,7 @@ impl App {
             delete_error: None,
             picker: None,
             current_dir: None,
+            initial_dir: None,
             current: 0,
             prefetcher: Prefetcher::new(),
             loaded: None,
@@ -449,6 +451,7 @@ impl App {
         let start = self
             .current_dir
             .clone()
+            .or_else(|| self.initial_dir.clone().map(|p| picker::canonicalize_or_self(&p)))
             .unwrap_or_else(|| picker::initial_picker_dir(&self.images));
         self.current_dir = Some(start.clone());
         self.picker = Some(PickerState::new(start));

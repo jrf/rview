@@ -74,6 +74,8 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     });
 
+    let initial_dir = initial_dir_from_paths(&paths);
+
     let shared_list = SharedImageList::new();
     scanner::spawn(paths, shared_list.clone());
 
@@ -85,6 +87,7 @@ fn main() -> io::Result<()> {
 
     let cell_px = query_cell_pixel_size();
     let mut app = App::new(theme, cell_px, shared_list);
+    app.initial_dir = Some(initial_dir);
     let result = run(&mut terminal, &mut app);
 
     encoder::kitty::delete_all()?;
@@ -93,12 +96,23 @@ fn main() -> io::Result<()> {
 
     result?;
 
-    if app.scan_complete && app.images.is_empty() && app.current_dir.is_none() {
-        eprintln!("No image files found.");
-        std::process::exit(1);
-    }
-
     Ok(())
+}
+
+fn initial_dir_from_paths(paths: &[PathBuf]) -> PathBuf {
+    for p in paths {
+        if p.is_dir() {
+            return p.clone();
+        }
+    }
+    if let Some(first) = paths.first() {
+        if let Some(parent) = first.parent() {
+            if !parent.as_os_str().is_empty() {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    PathBuf::from(".")
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
@@ -129,9 +143,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         if app.scan_complete
             && app.images.is_empty()
             && app.mode != ViewMode::Picker
-            && app.current_dir.is_none()
         {
-            return Ok(());
+            app.open_picker();
         }
 
         // 3. Draw UI chrome (always fast — ratatui only)
@@ -424,7 +437,11 @@ fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
 
     match code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => app.close_picker(),
+        KeyCode::Esc => {
+            if !app.images.is_empty() {
+                app.close_picker();
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             if let Some(p) = app.picker.as_mut() {
                 p.move_up();
