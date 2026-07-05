@@ -76,6 +76,12 @@ pub struct App {
     thumb_rx: mpsc::Receiver<(u32, usize, RgbaImage)>,
     thumb_loading: HashSet<usize>,
     thumb_generation: u32,
+
+    // Kitty IDs currently transmitted to the terminal — safe to `place_by_id` instead of retransmit.
+    pub transmitted_kitty_ids: HashSet<u32>,
+    /// True when the LRU thumb cache was invalidated but kitty's stored images haven't been wiped yet.
+    /// Consumed by render_gallery_images to issue a full `d=A` at the next redraw.
+    pub kitty_storage_dirty: bool,
 }
 
 impl App {
@@ -115,7 +121,22 @@ impl App {
             thumb_rx,
             thumb_loading: HashSet::new(),
             thumb_generation: 0,
+            transmitted_kitty_ids: HashSet::new(),
+            kitty_storage_dirty: false,
         }
+    }
+
+    /// Wipe all kitty storage (placements + stored images) AND drop our transmitted-ID tracking.
+    pub fn kitty_delete_all(&mut self) -> io::Result<()> {
+        crate::encoder::kitty::delete_all()?;
+        self.transmitted_kitty_ids.clear();
+        Ok(())
+    }
+
+    pub fn kitty_delete_all_to<W: std::io::Write>(&mut self, out: &mut W) -> io::Result<()> {
+        crate::encoder::kitty::delete_all_to(out)?;
+        self.transmitted_kitty_ids.clear();
+        Ok(())
     }
 
     pub fn refresh_from_scanner(&mut self) {
@@ -418,6 +439,7 @@ impl App {
         self.thumb_loading.clear();
         self.thumb_generation += 1;
         self.prefetcher.invalidate();
+        self.kitty_storage_dirty = true;
         self.fullscreen_rx = None;
         self.fullscreen_target = None;
         self.loaded = None;
@@ -495,6 +517,7 @@ impl App {
         self.thumb_loading.clear();
         self.thumb_generation += 1;
         self.prefetcher.invalidate();
+        self.kitty_storage_dirty = true;
         self.fullscreen_rx = None;
         self.fullscreen_target = None;
         self.loaded = None;
@@ -624,6 +647,7 @@ impl App {
         self.thumb_loading.clear();
         self.thumb_generation += 1;
         self.prefetcher.invalidate();
+        self.kitty_storage_dirty = true;
         self.needs_render = true;
     }
 

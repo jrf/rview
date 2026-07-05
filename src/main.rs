@@ -218,7 +218,7 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
             } else if app.pending_delete.is_some() {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        encoder::kitty::delete_all()?;
+                        app.kitty_delete_all()?;
                         app.confirm_delete();
                         if app.scan_complete && app.images.is_empty() {
                             return Ok(true);
@@ -234,21 +234,21 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                     ViewMode::Fullscreen => match key.code {
                         KeyCode::Char('q') => return Ok(true),
                         KeyCode::Char('?') => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.help_visible = true;
                         }
                         KeyCode::Esc => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.enter_gallery();
                         }
                         KeyCode::Left | KeyCode::Char('h') => app.prev(),
                         KeyCode::Right | KeyCode::Char('l') => app.next(),
                         KeyCode::Home => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.first();
                         }
                         KeyCode::End => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.last();
                         }
                         KeyCode::Char('d') => {
@@ -266,27 +266,27 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             }
                         }
                         KeyCode::Esc => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.exit_video();
                         }
                         KeyCode::Char('?') => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.help_visible = true;
                         }
                         KeyCode::Left | KeyCode::Char('h') => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.prev();
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.next();
                         }
                         KeyCode::Home => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.first();
                         }
                         KeyCode::End => {
-                            encoder::kitty::delete_all()?;
+                            app.kitty_delete_all()?;
                             app.last();
                         }
                         KeyCode::Char('d') => {
@@ -297,16 +297,18 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                     ViewMode::Gallery if app.gallery.search_active => match key.code {
                         KeyCode::Esc => {
                             app.gallery.search_active = false;
-                            app.gallery.search_query.clear();
-                            app.update_filter();
+                            if !app.gallery.search_query.is_empty() {
+                                app.gallery.search_query.clear();
+                                app.update_filter();
+                            }
                         }
                         KeyCode::Enter => {
                             app.gallery.search_active = false;
-                            app.update_filter();
                         }
                         KeyCode::Backspace => {
-                            app.gallery.search_query.pop();
-                            app.update_filter();
+                            if app.gallery.search_query.pop().is_some() {
+                                app.update_filter();
+                            }
                         }
                         KeyCode::Char(c) => {
                             app.gallery.search_query.push(c);
@@ -320,14 +322,14 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
                             KeyCode::Char('?') => {
-                                encoder::kitty::delete_all()?;
+                                app.kitty_delete_all()?;
                                 app.help_visible = true;
                             }
                             KeyCode::Char('/') => {
                                 app.gallery.search_active = true;
                             }
                             KeyCode::Enter => {
-                                encoder::kitty::delete_all()?;
+                                app.kitty_delete_all()?;
                                 app.enter_fullscreen_selected();
                             }
                             KeyCode::Left | KeyCode::Char('h') => {
@@ -372,11 +374,11 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                                 app.clear_selection();
                             }
                             KeyCode::Char('d') => {
-                                encoder::kitty::delete_all()?;
+                                app.kitty_delete_all()?;
                                 app.begin_delete();
                             }
                             KeyCode::Char('o') => {
-                                encoder::kitty::delete_all()?;
+                                app.kitty_delete_all()?;
                                 app.open_picker();
                             }
                             _ => {}
@@ -531,9 +533,9 @@ fn query_cell_pixel_size() -> (u32, u32) {
         .unwrap_or((8, 16))
 }
 
-fn render_fullscreen_image(app: &App) -> io::Result<()> {
+fn render_fullscreen_image(app: &mut App) -> io::Result<()> {
     let mut out = io::stdout().lock();
-    encoder::kitty::delete_all_to(&mut out)?;
+    app.kitty_delete_all_to(&mut out)?;
 
     if let Some(ref img) = app.loaded {
         let (cpw, cph) = app.cell_px;
@@ -588,9 +590,11 @@ fn render_video_frame(app: &App) -> io::Result<()> {
     out.flush()
 }
 
-fn emit_new_thumbnails(app: &App, new_indices: &[usize]) -> io::Result<()> {
+fn emit_new_thumbnails(app: &mut App, new_indices: &[usize]) -> io::Result<()> {
     let mut out = io::stdout().lock();
-    for (vis_idx, img_idx) in app.gallery.visible_items() {
+    let visible: Vec<(usize, usize)> = app.gallery.visible_items().collect();
+    let mut newly_transmitted: Vec<u32> = Vec::new();
+    for (vis_idx, img_idx) in visible {
         if !new_indices.contains(&img_idx) {
             continue;
         }
@@ -606,9 +610,14 @@ fn emit_new_thumbnails(app: &App, new_indices: &[usize]) -> io::Result<()> {
                     rows: None,
                 },
             )?;
+            newly_transmitted.push(id);
         }
     }
-    out.flush()
+    out.flush()?;
+    for id in newly_transmitted {
+        app.transmitted_kitty_ids.insert(id);
+    }
+    Ok(())
 }
 
 fn render_gallery_images(app: &mut App) -> io::Result<()> {
@@ -627,25 +636,42 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
     }
 
     let mut out = io::stdout().lock();
-    encoder::kitty::delete_all_to(&mut out)?;
+    if app.kitty_storage_dirty {
+        app.kitty_delete_all_to(&mut out)?;
+        app.kitty_storage_dirty = false;
+    } else {
+        // Drop visible placements only; keep stored image data so already-transmitted thumbs
+        // can be re-placed with a cheap `a=p` instead of a full PNG retransmit.
+        encoder::kitty::clear_placements_to(&mut out)?;
+    }
 
+    let mut newly_transmitted: Vec<u32> = Vec::new();
     for &(vis_idx, img_idx) in &visible {
         let cell_rect = app.gallery.cell_rect(vis_idx);
         if let Some((img, id)) = app.thumb_cache.peek(img_idx) {
             let inner_x = cell_rect.x + 1;
             let inner_y = cell_rect.y + 1;
             queue!(out, cursor::MoveTo(inner_x, inner_y))?;
-            encoder::kitty::encode_png_to(
-                &mut out,
-                img,
-                &encoder::kitty::DisplayOpts {
-                    id: Some(id),
-                    cols: None,
-                    rows: None,
-                },
-            )?;
+            if app.transmitted_kitty_ids.contains(&id) {
+                encoder::kitty::place_by_id_to(&mut out, id)?;
+            } else {
+                encoder::kitty::encode_png_to(
+                    &mut out,
+                    img,
+                    &encoder::kitty::DisplayOpts {
+                        id: Some(id),
+                        cols: None,
+                        rows: None,
+                    },
+                )?;
+                newly_transmitted.push(id);
+            }
         }
     }
 
-    out.flush()
+    out.flush()?;
+    for id in newly_transmitted {
+        app.transmitted_kitty_ids.insert(id);
+    }
+    Ok(())
 }

@@ -60,3 +60,13 @@ pub fn delete_all() -> io::Result<()> {
 pub fn delete_all_to<W: Write>(out: &mut W) -> io::Result<()> {
     out.write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\")
 }
+
+/// Delete visible placements only; keep stored image data (uppercase `A` would nuke storage).
+pub fn clear_placements_to<W: Write>(out: &mut W) -> io::Result<()> {
+    out.write_all(b"\x1b_Ga=d,d=a,q=2\x1b\\")
+}
+
+/// Place an already-transmitted image (by ID) at the cursor position. Cheap — no PNG payload.
+pub fn place_by_id_to<W: Write>(out: &mut W, id: u32) -> io::Result<()> {
+    write!(out, "\x1b_Ga=p,q=2,i={id}\x1b\\")
+}
