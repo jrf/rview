@@ -292,21 +292,16 @@ impl App {
         if !self.selection.remove(&path) {
             self.selection.insert(path);
         }
-        self.needs_render = true;
     }
 
     pub fn select_all_filtered(&mut self) {
         for &idx in &self.gallery.filtered_indices {
             self.selection.insert(self.images[idx].clone());
         }
-        self.needs_render = true;
     }
 
     pub fn clear_selection(&mut self) {
-        if !self.selection.is_empty() {
-            self.selection.clear();
-            self.needs_render = true;
-        }
+        self.selection.clear();
     }
 
     pub fn is_marked(&self, img_idx: usize) -> bool {
