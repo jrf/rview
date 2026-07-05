@@ -374,7 +374,6 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                                 app.clear_selection();
                             }
                             KeyCode::Char('d') => {
-                                app.kitty_delete_all()?;
                                 app.begin_delete();
                             }
                             KeyCode::Char('o') => {

@@ -373,13 +373,10 @@ impl App {
 
         self.pending_delete = Some(PendingDelete { paths, from_fullscreen });
         self.delete_error = None;
-        self.needs_render = true;
     }
 
     pub fn cancel_delete(&mut self) {
-        if self.pending_delete.take().is_some() {
-            self.needs_render = true;
-        }
+        self.pending_delete.take();
     }
 
     pub fn confirm_delete(&mut self) {
