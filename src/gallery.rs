@@ -141,7 +141,7 @@ pub struct ThumbnailCache {
 
 struct CachedThumb {
     image: RgbaImage,
-    kitty_id: u32,
+    image_id: u32,
 }
 
 impl ThumbnailCache {
@@ -157,21 +157,51 @@ impl ThumbnailCache {
     }
 
     pub fn peek(&self, index: usize) -> Option<(&RgbaImage, u32)> {
-        self.cache
-            .peek(&index)
-            .map(|t| (&t.image, t.kitty_id))
+        self.cache.peek(&index).map(|t| (&t.image, t.image_id))
     }
 
     pub fn insert(&mut self, index: usize, image: RgbaImage) {
         let id = self.next_id;
         self.next_id += 1;
-        self.cache.push(index, CachedThumb {
-            image,
-            kitty_id: id,
-        });
+        self.cache.push(
+            index,
+            CachedThumb {
+                image,
+                image_id: id,
+            },
+        );
     }
 
     pub fn clear(&mut self) {
         self.cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GalleryState, THUMB_COLS};
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn grid_navigation_tracks_rows_and_scroll() {
+        let mut gallery = GalleryState::new(12);
+        gallery.update_grid(Rect::new(0, 0, THUMB_COLS * 3, 20));
+
+        gallery.move_down();
+        assert_eq!(gallery.selected_index(), Some(3));
+        gallery.move_page_down();
+        assert_eq!(gallery.selected_index(), Some(9));
+        assert_eq!(gallery.scroll_offset, 2);
+        gallery.move_to_last();
+        assert_eq!(gallery.selected_index(), Some(11));
+    }
+
+    #[test]
+    fn empty_gallery_navigation_remains_unselected() {
+        let mut gallery = GalleryState::new(0);
+        gallery.move_right();
+        gallery.move_down();
+        gallery.move_to_last();
+        assert_eq!(gallery.selected_index(), None);
     }
 }

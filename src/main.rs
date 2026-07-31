@@ -17,11 +17,12 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute, queue,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use encoder::GraphicsBackend;
 use image_list::SharedImageList;
 use ratatui::prelude::*;
-use std::io::{self, stdout, Write};
+use std::io::{self, Write, stdout};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -40,9 +41,73 @@ struct Cli {
     threads: Option<usize>,
 }
 
+struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    restored: bool,
+}
+
+impl TerminalSession {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut output = stdout();
+        if let Err(error) = execute!(output, EnterAlternateScreen, cursor::Hide) {
+            let _ = disable_raw_mode();
+            let _ = execute!(output, cursor::Show, LeaveAlternateScreen);
+            return Err(error);
+        }
+
+        match Terminal::new(CrosstermBackend::new(output)) {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                restored: false,
+            }),
+            Err(error) => {
+                let _ = disable_raw_mode();
+                let _ = execute!(stdout(), cursor::Show, LeaveAlternateScreen);
+                Err(error)
+            }
+        }
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
+        &mut self.terminal
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        self.restored = true;
+
+        let mut first_error = encoder::KittyBackend.delete_all().err();
+        if let Err(error) = disable_raw_mode()
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = execute!(
+            self.terminal.backend_mut(),
+            cursor::Show,
+            LeaveAlternateScreen
+        ) && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
 fn main() -> io::Result<()> {
     #[cfg(feature = "video")]
-    ffmpeg::init().expect("failed to initialize ffmpeg");
+    ffmpeg::init()
+        .map_err(|error| io::Error::other(format!("failed to initialize ffmpeg: {error}")))?;
 
     let cli = Cli::parse();
     let paths = if cli.files.is_empty() {
@@ -52,15 +117,27 @@ fn main() -> io::Result<()> {
     };
 
     if let Some(n) = cli.threads {
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--threads must be greater than zero",
+            ));
+        }
         rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build_global()
-            .ok();
+            .map_err(|error| {
+                io::Error::other(format!("failed to configure thread pool: {error}"))
+            })?;
     }
 
     for p in &paths {
         if !p.is_dir() && !p.exists() {
             eprintln!("{}: file not found", p.display());
+            std::process::exit(1);
+        }
+        if p.is_file() && !scanner::is_supported(p) {
+            eprintln!("{}: unsupported media format", p.display());
             std::process::exit(1);
         }
     }
@@ -79,24 +156,14 @@ fn main() -> io::Result<()> {
     let shared_list = SharedImageList::new();
     scanner::spawn(paths, shared_list.clone());
 
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut session = TerminalSession::enter()?;
 
     let cell_px = query_cell_pixel_size();
     let mut app = App::new(theme, cell_px, shared_list);
     app.initial_dir = Some(initial_dir);
-    let result = run(&mut terminal, &mut app);
-
-    encoder::kitty::delete_all()?;
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), cursor::Show, LeaveAlternateScreen)?;
-
-    result?;
-
-    Ok(())
+    let run_result = run(session.terminal_mut(), &mut app);
+    let restore_result = session.restore();
+    run_result.and(restore_result)
 }
 
 fn initial_dir_from_paths(paths: &[PathBuf]) -> PathBuf {
@@ -142,6 +209,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
         if app.scan_complete
             && app.images.is_empty()
+            && app.error.is_none()
             && app.mode != ViewMode::Picker
         {
             app.open_picker();
@@ -218,7 +286,7 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
             } else if app.pending_delete.is_some() {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        app.kitty_delete_all()?;
+                        app.graphics_delete_all()?;
                         app.confirm_delete();
                         if app.scan_complete && app.images.is_empty() {
                             return Ok(true);
@@ -234,25 +302,25 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                     ViewMode::Fullscreen => match key.code {
                         KeyCode::Char('q') => return Ok(true),
                         KeyCode::Char('?') => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.help_visible = true;
                         }
                         KeyCode::Esc => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.enter_gallery();
                         }
                         KeyCode::Left | KeyCode::Char('h') => app.prev(),
                         KeyCode::Right | KeyCode::Char('l') => app.next(),
                         KeyCode::Home => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.first();
                         }
                         KeyCode::End => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.last();
                         }
-                        KeyCode::Char('d') => {
-                            app.begin_delete();
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            app.begin_delete(matches!(key.code, KeyCode::Char('D')));
                         }
                         _ => {}
                     },
@@ -266,31 +334,31 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             }
                         }
                         KeyCode::Esc => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.exit_video();
                         }
                         KeyCode::Char('?') => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.help_visible = true;
                         }
                         KeyCode::Left | KeyCode::Char('h') => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.prev();
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.next();
                         }
                         KeyCode::Home => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.first();
                         }
                         KeyCode::End => {
-                            app.kitty_delete_all()?;
+                            app.graphics_delete_all()?;
                             app.last();
                         }
-                        KeyCode::Char('d') => {
-                            app.begin_delete();
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            app.begin_delete(matches!(key.code, KeyCode::Char('D')));
                         }
                         _ => {}
                     },
@@ -305,10 +373,8 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         KeyCode::Enter => {
                             app.gallery.search_active = false;
                         }
-                        KeyCode::Backspace => {
-                            if app.gallery.search_query.pop().is_some() {
-                                app.update_filter();
-                            }
+                        KeyCode::Backspace if app.gallery.search_query.pop().is_some() => {
+                            app.update_filter();
                         }
                         KeyCode::Char(c) => {
                             app.gallery.search_query.push(c);
@@ -322,14 +388,14 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
                             KeyCode::Char('?') => {
-                                app.kitty_delete_all()?;
+                                app.graphics_delete_all()?;
                                 app.help_visible = true;
                             }
                             KeyCode::Char('/') => {
                                 app.gallery.search_active = true;
                             }
                             KeyCode::Enter => {
-                                app.kitty_delete_all()?;
+                                app.graphics_delete_all()?;
                                 app.enter_fullscreen_selected();
                             }
                             KeyCode::Left | KeyCode::Char('h') => {
@@ -348,11 +414,15 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                                 app.gallery.move_down();
                                 app.pre_decode_hovered();
                             }
-                            KeyCode::PageUp | KeyCode::Char('b') if ctrl || matches!(key.code, KeyCode::PageUp) => {
+                            KeyCode::PageUp | KeyCode::Char('b')
+                                if ctrl || matches!(key.code, KeyCode::PageUp) =>
+                            {
                                 app.gallery.move_page_up();
                                 app.pre_decode_hovered();
                             }
-                            KeyCode::PageDown | KeyCode::Char('f') if ctrl || matches!(key.code, KeyCode::PageDown) => {
+                            KeyCode::PageDown | KeyCode::Char('f')
+                                if ctrl || matches!(key.code, KeyCode::PageDown) =>
+                            {
                                 app.gallery.move_page_down();
                                 app.pre_decode_hovered();
                             }
@@ -373,11 +443,11 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             KeyCode::Char('A') => {
                                 app.clear_selection();
                             }
-                            KeyCode::Char('d') => {
-                                app.begin_delete();
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                app.begin_delete(matches!(key.code, KeyCode::Char('D')));
                             }
                             KeyCode::Char('o') => {
-                                app.kitty_delete_all()?;
+                                app.graphics_delete_all()?;
                                 app.open_picker();
                             }
                             _ => {}
@@ -401,10 +471,7 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
 }
 
 fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
-    let filter_active = app
-        .picker
-        .as_ref()
-        .is_some_and(|p| p.filter_active);
+    let filter_active = app.picker.as_ref().is_some_and(|p| p.filter_active);
 
     if filter_active {
         let Some(picker) = app.picker.as_mut() else {
@@ -438,10 +505,8 @@ fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
 
     match code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => {
-            if !app.images.is_empty() {
-                app.close_picker();
-            }
+        KeyCode::Esc if !app.images.is_empty() => {
+            app.close_picker();
         }
         KeyCode::Up | KeyCode::Char('k') => {
             if let Some(p) = app.picker.as_mut() {
@@ -534,22 +599,26 @@ fn query_cell_pixel_size() -> (u32, u32) {
 
 fn render_fullscreen_image(app: &mut App) -> io::Result<()> {
     let mut out = io::stdout().lock();
-    app.kitty_delete_all_to(&mut out)?;
+    app.graphics_delete_all_to(&mut out)?;
 
     if let Some(ref img) = app.loaded {
         let (cpw, cph) = app.cell_px;
-        let img_cols = (img.width() + cpw - 1) / cpw;
-        let img_rows = (img.height() + cph - 1) / cph;
+        let img_cols = img.width().div_ceil(cpw);
+        let img_rows = img.height().div_ceil(cph);
         let offset_x =
             app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
         let offset_y =
             app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
 
         queue!(out, cursor::MoveTo(offset_x, offset_y))?;
-        encoder::kitty::encode_png_to(
+        app.graphics.transmit(
             &mut out,
             img,
-            &encoder::kitty::DisplayOpts { id: None, cols: None, rows: None },
+            &encoder::DisplayOptions {
+                id: None,
+                cols: None,
+                rows: None,
+            },
         )?;
     }
 
@@ -568,8 +637,8 @@ fn render_video_frame(app: &App) -> io::Result<()> {
     if let Some(ref v) = app.video {
         if let Some(ref img) = v.current_frame {
             let (cpw, cph) = app.cell_px;
-            let img_cols = (img.width() + cpw - 1) / cpw;
-            let img_rows = (img.height() + cph - 1) / cph;
+            let img_cols = img.width().div_ceil(cpw);
+            let img_rows = img.height().div_ceil(cph);
             let offset_x =
                 app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
             let offset_y =
@@ -577,10 +646,14 @@ fn render_video_frame(app: &App) -> io::Result<()> {
 
             queue!(out, BeginSynchronizedUpdate)?;
             queue!(out, cursor::MoveTo(offset_x, offset_y))?;
-            encoder::kitty::encode_png_to(
+            app.graphics.transmit(
                 &mut out,
                 img,
-                &encoder::kitty::DisplayOpts { id: Some(VIDEO_IMAGE_ID), cols: None, rows: None },
+                &encoder::DisplayOptions {
+                    id: Some(VIDEO_IMAGE_ID),
+                    cols: None,
+                    rows: None,
+                },
             )?;
             queue!(out, EndSynchronizedUpdate)?;
         }
@@ -600,10 +673,10 @@ fn emit_new_thumbnails(app: &mut App, new_indices: &[usize]) -> io::Result<()> {
         let cell_rect = app.gallery.cell_rect(vis_idx);
         if let Some((img, id)) = app.thumb_cache.peek(img_idx) {
             queue!(out, cursor::MoveTo(cell_rect.x + 1, cell_rect.y + 1))?;
-            encoder::kitty::encode_png_to(
+            app.graphics.transmit(
                 &mut out,
                 img,
-                &encoder::kitty::DisplayOpts {
+                &encoder::DisplayOptions {
                     id: Some(id),
                     cols: None,
                     rows: None,
@@ -614,7 +687,7 @@ fn emit_new_thumbnails(app: &mut App, new_indices: &[usize]) -> io::Result<()> {
     }
     out.flush()?;
     for id in newly_transmitted {
-        app.transmitted_kitty_ids.insert(id);
+        app.transmitted_image_ids.insert(id);
     }
     Ok(())
 }
@@ -635,13 +708,13 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
     }
 
     let mut out = io::stdout().lock();
-    if app.kitty_storage_dirty {
-        app.kitty_delete_all_to(&mut out)?;
-        app.kitty_storage_dirty = false;
+    if app.graphics_storage_dirty {
+        app.graphics_delete_all_to(&mut out)?;
+        app.graphics_storage_dirty = false;
     } else {
         // Drop visible placements only; keep stored image data so already-transmitted thumbs
         // can be re-placed with a cheap `a=p` instead of a full PNG retransmit.
-        encoder::kitty::clear_placements_to(&mut out)?;
+        app.graphics.clear_placements_to(&mut out)?;
     }
 
     let mut newly_transmitted: Vec<u32> = Vec::new();
@@ -651,13 +724,13 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
             let inner_x = cell_rect.x + 1;
             let inner_y = cell_rect.y + 1;
             queue!(out, cursor::MoveTo(inner_x, inner_y))?;
-            if app.transmitted_kitty_ids.contains(&id) {
-                encoder::kitty::place_by_id_to(&mut out, id)?;
+            if app.transmitted_image_ids.contains(&id) {
+                app.graphics.place_by_id_to(&mut out, id)?;
             } else {
-                encoder::kitty::encode_png_to(
+                app.graphics.transmit(
                     &mut out,
                     img,
-                    &encoder::kitty::DisplayOpts {
+                    &encoder::DisplayOptions {
                         id: Some(id),
                         cols: None,
                         rows: None,
@@ -670,7 +743,7 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
 
     out.flush()?;
     for id in newly_transmitted {
-        app.transmitted_kitty_ids.insert(id);
+        app.transmitted_image_ids.insert(id);
     }
     Ok(())
 }

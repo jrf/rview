@@ -53,7 +53,7 @@ impl VideoPlayback {
             .best(ffmpeg::media::Type::Video)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no video stream found"))?;
 
-        let fps = {
+        let reported_fps = {
             let rate = stream.avg_frame_rate();
             if rate.denominator() > 0 {
                 rate.numerator() as f64 / rate.denominator() as f64
@@ -61,6 +61,7 @@ impl VideoPlayback {
                 24.0
             }
         };
+        let fps = sanitize_fps(reported_fps);
         let duration = if input.duration() > 0 {
             input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE)
         } else {
@@ -142,6 +143,14 @@ impl VideoPlayback {
 
     pub fn stop(&mut self) {
         let _ = self.cmd_tx.send(VideoCmd::Stop);
+    }
+}
+
+fn sanitize_fps(fps: f64) -> f64 {
+    if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        24.0
     }
 }
 
@@ -334,9 +343,8 @@ pub fn decode_first_frame(path: &Path, rect: Rect, cell_px: (u32, u32)) -> io::R
 
     let stream_index = stream.index();
 
-    let context =
-        ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let mut decoder = context
         .decoder()
         .video()
@@ -390,5 +398,26 @@ pub fn decode_first_frame(path: &Path, rect: Rect, cell_px: (u32, u32)) -> io::R
         }
     }
 
-    Err(io::Error::new(io::ErrorKind::InvalidData, "no frames decoded"))
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "no frames decoded",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fit_aspect, sanitize_fps};
+
+    #[test]
+    fn invalid_frame_rates_use_the_fallback() {
+        for fps in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert_eq!(sanitize_fps(fps), 24.0);
+        }
+    }
+
+    #[test]
+    fn aspect_ratio_fits_within_the_target() {
+        assert_eq!(fit_aspect(1920, 1080, 800, 600), (800, 450));
+        assert_eq!(fit_aspect(1080, 1920, 800, 600), (338, 600));
+    }
 }

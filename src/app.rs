@@ -1,3 +1,4 @@
+use crate::encoder::{GraphicsBackend, KittyBackend};
 use crate::gallery::{GalleryState, ThumbnailCache};
 use crate::image_list::SharedImageList;
 use crate::picker::{self, PickerState};
@@ -5,13 +6,15 @@ use crate::prefetch::Prefetcher;
 use crate::scanner;
 use crate::search;
 use crate::theme::Theme;
+use directories::ProjectDirs;
 use fast_image_resize as fir;
 use image::{DynamicImage, ImageReader, RgbaImage};
 use ratatui::layout::Rect;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, mpsc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -25,6 +28,7 @@ pub enum ViewMode {
 pub struct PendingDelete {
     pub paths: Vec<PathBuf>,
     pub from_fullscreen: bool,
+    pub permanent: bool,
 }
 
 pub struct App {
@@ -33,6 +37,7 @@ pub struct App {
     pub mode: ViewMode,
     pub theme: Theme,
     pub cell_px: (u32, u32),
+    pub graphics: KittyBackend,
 
     // Gallery state
     pub gallery: GalleryState,
@@ -78,10 +83,10 @@ pub struct App {
     thumb_generation: u32,
 
     // Kitty IDs currently transmitted to the terminal — safe to `place_by_id` instead of retransmit.
-    pub transmitted_kitty_ids: HashSet<u32>,
-    /// True when the LRU thumb cache was invalidated but kitty's stored images haven't been wiped yet.
+    pub transmitted_image_ids: HashSet<u32>,
+    /// True when the LRU thumb cache was invalidated but backend storage has not been cleared yet.
     /// Consumed by render_gallery_images to issue a full `d=A` at the next redraw.
-    pub kitty_storage_dirty: bool,
+    pub graphics_storage_dirty: bool,
 }
 
 impl App {
@@ -93,6 +98,7 @@ impl App {
             mode: ViewMode::Gallery,
             theme,
             cell_px,
+            graphics: KittyBackend,
             gallery: GalleryState::new(0),
             thumb_cache: ThumbnailCache::new(),
             selection: HashSet::new(),
@@ -121,25 +127,31 @@ impl App {
             thumb_rx,
             thumb_loading: HashSet::new(),
             thumb_generation: 0,
-            transmitted_kitty_ids: HashSet::new(),
-            kitty_storage_dirty: false,
+            transmitted_image_ids: HashSet::new(),
+            graphics_storage_dirty: false,
         }
     }
 
-    /// Wipe all kitty storage (placements + stored images) AND drop our transmitted-ID tracking.
-    pub fn kitty_delete_all(&mut self) -> io::Result<()> {
-        crate::encoder::kitty::delete_all()?;
-        self.transmitted_kitty_ids.clear();
+    /// Wipe backend storage and drop transmitted-image tracking.
+    pub fn graphics_delete_all(&mut self) -> io::Result<()> {
+        self.graphics.delete_all()?;
+        self.transmitted_image_ids.clear();
         Ok(())
     }
 
-    pub fn kitty_delete_all_to<W: std::io::Write>(&mut self, out: &mut W) -> io::Result<()> {
-        crate::encoder::kitty::delete_all_to(out)?;
-        self.transmitted_kitty_ids.clear();
+    pub fn graphics_delete_all_to<W: std::io::Write>(&mut self, out: &mut W) -> io::Result<()> {
+        self.graphics.delete_all_to(out)?;
+        self.transmitted_image_ids.clear();
         Ok(())
     }
 
     pub fn refresh_from_scanner(&mut self) {
+        let scan_errors = self.shared_list.drain_errors();
+        if !scan_errors.is_empty() {
+            self.error = Some(scan_errors.join("; "));
+            self.needs_render = true;
+        }
+
         let new_len = self.shared_list.len();
         if new_len > self.known_len {
             let (new_paths, new_filenames) = self.shared_list.drain_since(self.known_len);
@@ -151,6 +163,8 @@ impl App {
                 self.gallery
                     .filtered_indices
                     .extend(old_len..self.images.len());
+            } else {
+                self.update_filter();
             }
 
             self.known_len = new_len;
@@ -161,12 +175,59 @@ impl App {
 
         if !self.scan_complete && self.shared_list.is_complete() {
             self.scan_complete = true;
+            self.finalize_scan_order();
 
             if self.images.len() == 1 && self.mode == ViewMode::Gallery {
                 self.mode = ViewMode::Fullscreen;
                 self.needs_render = true;
             }
         }
+    }
+
+    fn finalize_scan_order(&mut self) {
+        if self.images.len() < 2 {
+            return;
+        }
+
+        let selected_path = self
+            .gallery
+            .selected_index()
+            .and_then(|index| self.images.get(index))
+            .cloned();
+        let current_path = self.images.get(self.current).cloned();
+        let mut media: Vec<(PathBuf, String)> = self
+            .images
+            .drain(..)
+            .zip(self.filenames.drain(..))
+            .collect();
+        media.sort_by_cached_key(|(path, filename)| (filename.to_lowercase(), path.clone()));
+        (self.images, self.filenames) = media.into_iter().unzip();
+
+        self.current = current_path
+            .as_ref()
+            .and_then(|path| self.images.iter().position(|candidate| candidate == path))
+            .unwrap_or(0);
+        if self.gallery.search_query.is_empty() {
+            self.gallery.filtered_indices = (0..self.images.len()).collect();
+            self.gallery.cursor = selected_path
+                .as_ref()
+                .and_then(|path| self.images.iter().position(|candidate| candidate == path))
+                .unwrap_or(0);
+            self.gallery.ensure_cursor_visible();
+        } else {
+            self.update_filter();
+        }
+
+        self.shared_list
+            .replace_all(self.images.clone(), self.filenames.clone());
+        self.known_len = self.images.len();
+        self.thumb_cache.clear();
+        self.thumb_loading.clear();
+        self.thumb_generation += 1;
+        self.prefetcher.invalidate();
+        self.graphics_storage_dirty = true;
+        self.loaded = None;
+        self.needs_render = true;
     }
 
     pub fn is_scanning(&self) -> bool {
@@ -333,7 +394,7 @@ impl App {
             .is_some_and(|p| self.selection.contains(p))
     }
 
-    pub fn begin_delete(&mut self) {
+    pub fn begin_delete(&mut self, permanent: bool) {
         let from_fullscreen = matches!(self.mode, ViewMode::Fullscreen);
         #[cfg(feature = "video")]
         let from_fullscreen = from_fullscreen || matches!(self.mode, ViewMode::Video);
@@ -371,7 +432,11 @@ impl App {
             return;
         }
 
-        self.pending_delete = Some(PendingDelete { paths, from_fullscreen });
+        self.pending_delete = Some(PendingDelete {
+            paths,
+            from_fullscreen,
+            permanent,
+        });
         self.delete_error = None;
     }
 
@@ -387,12 +452,17 @@ impl App {
         let mut removed: HashSet<PathBuf> = HashSet::new();
         let mut errors: Vec<String> = Vec::new();
         for p in &pending.paths {
-            match std::fs::remove_file(p) {
+            let result = if pending.permanent {
+                std::fs::remove_file(p).map_err(|error| error.to_string())
+            } else {
+                trash::delete(p).map_err(|error| error.to_string())
+            };
+            match result {
                 Ok(()) => {
                     removed.insert(p.clone());
                 }
-                Err(e) => {
-                    errors.push(format!("{}: {}", p.display(), e));
+                Err(error) => {
+                    errors.push(format!("{}: {error}", p.display()));
                 }
             }
         }
@@ -420,7 +490,8 @@ impl App {
             self.selection.remove(p);
         }
         self.known_len = self.images.len();
-        self.shared_list.replace_all(self.images.clone(), self.filenames.clone());
+        self.shared_list
+            .replace_all(self.images.clone(), self.filenames.clone());
 
         self.update_filter();
         if self.gallery.search_query.is_empty() {
@@ -436,7 +507,7 @@ impl App {
         self.thumb_loading.clear();
         self.thumb_generation += 1;
         self.prefetcher.invalidate();
-        self.kitty_storage_dirty = true;
+        self.graphics_storage_dirty = true;
         self.fullscreen_rx = None;
         self.fullscreen_target = None;
         self.loaded = None;
@@ -470,7 +541,11 @@ impl App {
         let start = self
             .current_dir
             .clone()
-            .or_else(|| self.initial_dir.clone().map(|p| picker::canonicalize_or_self(&p)))
+            .or_else(|| {
+                self.initial_dir
+                    .clone()
+                    .map(|p| picker::canonicalize_or_self(&p))
+            })
             .unwrap_or_else(|| picker::initial_picker_dir(&self.images));
         self.current_dir = Some(start.clone());
         self.picker = Some(PickerState::new(start));
@@ -514,7 +589,7 @@ impl App {
         self.thumb_loading.clear();
         self.thumb_generation += 1;
         self.prefetcher.invalidate();
-        self.kitty_storage_dirty = true;
+        self.graphics_storage_dirty = true;
         self.fullscreen_rx = None;
         self.fullscreen_target = None;
         self.loaded = None;
@@ -574,9 +649,9 @@ impl App {
         }
 
         self.mode = ViewMode::Fullscreen;
-        if let Some(img) =
-            self.prefetcher
-                .take_resized(self.current, self.image_rect, self.cell_px)
+        if let Some(img) = self
+            .prefetcher
+            .take_resized(self.current, self.image_rect, self.cell_px)
         {
             self.loaded = Some(img);
             self.loaded_for_rect = self.image_rect;
@@ -644,7 +719,7 @@ impl App {
         self.thumb_loading.clear();
         self.thumb_generation += 1;
         self.prefetcher.invalidate();
-        self.kitty_storage_dirty = true;
+        self.graphics_storage_dirty = true;
         self.needs_render = true;
     }
 
@@ -827,20 +902,22 @@ fn get_cache_file_path(path: &Path, target_w: u32, target_h: u32) -> Option<Path
         .modified()
         .ok()?
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+        .ok()?;
+    let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
     let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    mtime.hash(&mut hasher);
+    "rview-thumbnail-v2".hash(&mut hasher);
+    canonical_path.hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    mtime.as_secs().hash(&mut hasher);
+    mtime.subsec_nanos().hash(&mut hasher);
     target_w.hash(&mut hasher);
     target_h.hash(&mut hasher);
     let filename = format!("{:016x}.png", hasher.finish());
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let mut cache_dir = PathBuf::from(home);
-    cache_dir.push(".cache");
-    cache_dir.push("rview");
+    let cache_dir = ProjectDirs::from("", "", "rview")
+        .map(|dirs| dirs.cache_dir().to_path_buf())
+        .unwrap_or_else(|| std::env::temp_dir().join("rview-cache"));
 
     Some(cache_dir.join(filename))
 }
@@ -848,7 +925,13 @@ fn get_cache_file_path(path: &Path, target_w: u32, target_h: u32) -> Option<Path
 fn try_load_from_disk_cache(path: &Path, target_w: u32, target_h: u32) -> Option<RgbaImage> {
     let cache_path = get_cache_file_path(path, target_w, target_h)?;
     if cache_path.exists() {
-        image::open(&cache_path).ok().map(|img| img.to_rgba8())
+        match image::open(&cache_path) {
+            Ok(image) => Some(image.to_rgba8()),
+            Err(_) => {
+                let _ = std::fs::remove_file(cache_path);
+                None
+            }
+        }
     } else {
         None
     }
@@ -861,9 +944,112 @@ fn try_save_to_disk_cache(
     img: &RgbaImage,
 ) -> Option<()> {
     use std::fs;
+    static CACHE_PRUNED: OnceLock<()> = OnceLock::new();
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let cache_path = get_cache_file_path(path, target_w, target_h)?;
     let parent = cache_path.parent()?;
     fs::create_dir_all(parent).ok()?;
-    img.save(&cache_path).ok()?;
+    CACHE_PRUNED.get_or_init(|| prune_disk_cache(parent, 512 * 1024 * 1024));
+    if cache_path.exists() {
+        return Some(());
+    }
+
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let cache_name = cache_path.file_name()?.to_string_lossy();
+    let temp_path = parent.join(format!(
+        ".{cache_name}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    if img
+        .save_with_format(&temp_path, image::ImageFormat::Png)
+        .is_err()
+    {
+        let _ = fs::remove_file(temp_path);
+        return None;
+    }
+    if fs::rename(&temp_path, &cache_path).is_err() {
+        let _ = fs::remove_file(temp_path);
+        if !cache_path.exists() {
+            return None;
+        }
+    }
+    if sequence % 64 == 0 {
+        prune_disk_cache(parent, 512 * 1024 * 1024);
+    }
     Some(())
+}
+
+fn prune_disk_cache(cache_dir: &Path, max_bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("png") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(|| {
+                (
+                    entry.path(),
+                    metadata.len(),
+                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                )
+            })
+        })
+        .collect();
+    let mut total_bytes: u64 = files.iter().map(|(_, bytes, _)| bytes).sum();
+    if total_bytes <= max_bytes {
+        return;
+    }
+
+    files.sort_by_key(|(_, _, modified)| *modified);
+    for (path, bytes, _) in files {
+        if total_bytes <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total_bytes = total_bytes.saturating_sub(bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_cache_file_path, resize_decoded_to_dims};
+    use image::DynamicImage;
+    use std::fs;
+
+    #[test]
+    fn resize_preserves_aspect_ratio_without_upscaling() {
+        let image = DynamicImage::new_rgba8(100, 50);
+        assert_eq!(
+            resize_decoded_to_dims(&image, 20, 20).dimensions(),
+            (20, 10)
+        );
+        assert_eq!(
+            resize_decoded_to_dims(&image, 200, 200).dimensions(),
+            (100, 50)
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_with_dimensions_and_source_size() {
+        let source = std::env::temp_dir().join(format!(
+            "rview-synthetic-cache-source-{}.png",
+            std::process::id()
+        ));
+        fs::write(&source, b"synthetic-a").unwrap();
+        let first = get_cache_file_path(&source, 100, 100).unwrap();
+        let resized = get_cache_file_path(&source, 200, 100).unwrap();
+        fs::write(&source, b"synthetic-content-b").unwrap();
+        let changed = get_cache_file_path(&source, 100, 100).unwrap();
+        fs::remove_file(source).unwrap();
+
+        assert_ne!(first, resized);
+        assert_ne!(first, changed);
+    }
 }

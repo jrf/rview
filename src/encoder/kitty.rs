@@ -1,18 +1,17 @@
-use base64::engine::general_purpose::STANDARD;
+use super::DisplayOptions;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ImageEncoder, RgbaImage};
 use std::io::{self, Write};
 
 const CHUNK_SIZE: usize = 4096;
 
-pub struct DisplayOpts {
-    pub id: Option<u32>,
-    pub cols: Option<u16>,
-    pub rows: Option<u16>,
-}
-
-pub fn encode_png_to<W: Write>(out: &mut W, img: &RgbaImage, opts: &DisplayOpts) -> io::Result<()> {
+pub fn encode_png_to<W: Write + ?Sized>(
+    out: &mut W,
+    img: &RgbaImage,
+    opts: &DisplayOptions,
+) -> io::Result<()> {
     let (w, h) = img.dimensions();
 
     let is_ssh = std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_CONNECTION").is_ok();
@@ -57,16 +56,55 @@ pub fn delete_all() -> io::Result<()> {
     out.flush()
 }
 
-pub fn delete_all_to<W: Write>(out: &mut W) -> io::Result<()> {
+pub fn delete_all_to<W: Write + ?Sized>(out: &mut W) -> io::Result<()> {
     out.write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\")
 }
 
 /// Delete visible placements only; keep stored image data (uppercase `A` would nuke storage).
-pub fn clear_placements_to<W: Write>(out: &mut W) -> io::Result<()> {
+pub fn clear_placements_to<W: Write + ?Sized>(out: &mut W) -> io::Result<()> {
     out.write_all(b"\x1b_Ga=d,d=a,q=2\x1b\\")
 }
 
 /// Place an already-transmitted image (by ID) at the cursor position. Cheap — no PNG payload.
-pub fn place_by_id_to<W: Write>(out: &mut W, id: u32) -> io::Result<()> {
+pub fn place_by_id_to<W: Write + ?Sized>(out: &mut W, id: u32) -> io::Result<()> {
     write!(out, "\x1b_Ga=p,q=2,i={id}\x1b\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_placements_to, delete_all_to, encode_png_to, place_by_id_to};
+    use crate::encoder::DisplayOptions;
+    use image::RgbaImage;
+
+    #[test]
+    fn management_sequences_match_the_kitty_protocol() {
+        let mut output = Vec::new();
+        delete_all_to(&mut output).unwrap();
+        clear_placements_to(&mut output).unwrap();
+        place_by_id_to(&mut output, 42).unwrap();
+        assert_eq!(
+            output,
+            b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b_Ga=d,d=a,q=2\x1b\\\x1b_Ga=p,q=2,i=42\x1b\\"
+        );
+    }
+
+    #[test]
+    fn transmission_includes_dimensions_and_id() {
+        let image = RgbaImage::new(2, 3);
+        let mut output = Vec::new();
+        encode_png_to(
+            &mut output,
+            &image,
+            &DisplayOptions {
+                id: Some(7),
+                cols: None,
+                rows: None,
+            },
+        )
+        .unwrap();
+        let encoded = String::from_utf8(output).unwrap();
+        assert!(encoded.starts_with("\u{1b}_Ga=T,q=2,"));
+        assert!(encoded.contains(",s=2,v=3,i=7,"));
+        assert!(encoded.ends_with("\u{1b}\\"));
+    }
 }

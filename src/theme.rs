@@ -3,6 +3,9 @@ use ratatui::style::{Color, Modifier, Style};
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Theme {
+    // Canvas
+    pub background: Style,
+
     // Borders
     pub border: Style,
     pub border_selected: Style,
@@ -49,32 +52,44 @@ impl Theme {
     }
 
     pub fn tokyonight() -> Self {
+        let bg = Color::Rgb(0x22, 0x24, 0x36);
+        let bg_dark1 = Color::Rgb(0x19, 0x1b, 0x29);
         let fg = Color::Rgb(0xc8, 0xd3, 0xf5);
         let fg_dark = Color::Rgb(0x82, 0x8b, 0xb8);
         let bg_dark = Color::Rgb(0x1e, 0x20, 0x30);
         let bg_highlight = Color::Rgb(0x2f, 0x33, 0x4d);
         let blue = Color::Rgb(0x82, 0xaa, 0xff);
+        let blue5 = Color::Rgb(0x89, 0xdd, 0xff);
         let yellow = Color::Rgb(0xff, 0xc7, 0x77);
         let red = Color::Rgb(0xff, 0x75, 0x7f);
         let green = Color::Rgb(0xc3, 0xe8, 0x8d);
+        let green1 = Color::Rgb(0x4f, 0xd6, 0xbe);
+        let magenta = Color::Rgb(0xc0, 0x99, 0xff);
         let comment = Color::Rgb(0x63, 0x6d, 0xa6);
-        let dark5 = Color::Rgb(0x73, 0x7a, 0xa2);
+        let dark3 = Color::Rgb(0x54, 0x5c, 0x7e);
 
         Self {
-            border: Style::default().fg(comment),
-            border_selected: Style::default().fg(blue).add_modifier(Modifier::BOLD),
+            background: Style::default().bg(bg),
+            border: Style::default().fg(dark3),
+            border_selected: Style::default().fg(magenta).add_modifier(Modifier::BOLD),
             border_marked: Style::default().fg(green).add_modifier(Modifier::BOLD),
             title: Style::default().fg(blue).add_modifier(Modifier::BOLD),
-            label: Style::default().fg(fg_dark),
-            label_selected: Style::default().fg(yellow),
-            status_bar: Style::default().fg(fg).bg(bg_highlight),
-            status_bar_error: Style::default().fg(bg_dark).bg(red),
-            status_bar_dim: Style::default().fg(dark5).bg(bg_highlight),
-            mode_normal: Style::default().fg(bg_dark).bg(blue).add_modifier(Modifier::BOLD),
-            mode_search: Style::default().fg(bg_dark).bg(green).add_modifier(Modifier::BOLD),
+            label: Style::default().fg(fg),
+            label_selected: Style::default().fg(magenta),
+            status_bar: Style::default().fg(fg).bg(bg_dark),
+            status_bar_error: Style::default().fg(bg_dark1).bg(red),
+            status_bar_dim: Style::default().fg(comment).bg(bg_dark),
+            mode_normal: Style::default()
+                .fg(bg_dark1)
+                .bg(blue)
+                .add_modifier(Modifier::BOLD),
+            mode_search: Style::default()
+                .fg(bg_dark1)
+                .bg(green1)
+                .add_modifier(Modifier::BOLD),
             search_input: Style::default().fg(fg).bg(bg_highlight),
-            search_cursor: Style::default().fg(bg_dark).bg(blue),
-            popup_border: Style::default().fg(blue),
+            search_cursor: Style::default().fg(bg_dark1).bg(blue5),
+            popup_border: Style::default().fg(magenta),
             popup_title: Style::default().fg(yellow).add_modifier(Modifier::BOLD),
             popup_text: Style::default().fg(fg),
             popup_key: Style::default().fg(blue).add_modifier(Modifier::BOLD),
@@ -84,46 +99,80 @@ impl Theme {
 
     pub fn dark() -> Self {
         Self {
+            background: Style::default(),
             border: Style::default().fg(Color::DarkGray),
-            border_selected: Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            border_marked: Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            title: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            border_selected: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            border_marked: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            title: Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
             label: Style::default().fg(Color::White),
             label_selected: Style::default().fg(Color::Yellow),
             status_bar: Style::default().fg(Color::Black).bg(Color::White),
             status_bar_error: Style::default().fg(Color::White).bg(Color::Red),
             status_bar_dim: Style::default().fg(Color::DarkGray).bg(Color::White),
-            mode_normal: Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD),
-            mode_search: Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+            mode_normal: Style::default()
+                .fg(Color::Black)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+            mode_search: Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
             search_input: Style::default().fg(Color::White).bg(Color::DarkGray),
             search_cursor: Style::default().fg(Color::Black).bg(Color::White),
             popup_border: Style::default().fg(Color::Yellow),
-            popup_title: Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            popup_title: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
             popup_text: Style::default().fg(Color::White),
-            popup_key: Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            popup_key: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
             popup_desc: Style::default().fg(Color::Gray),
         }
     }
 
     pub fn light() -> Self {
         Self {
+            background: Style::default(),
             border: Style::default().fg(Color::Gray),
-            border_selected: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            border_marked: Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            title: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            border_selected: Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+            border_marked: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            title: Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
             label: Style::default().fg(Color::Black),
             label_selected: Style::default().fg(Color::Blue),
             status_bar: Style::default().fg(Color::White).bg(Color::DarkGray),
             status_bar_error: Style::default().fg(Color::White).bg(Color::Red),
             status_bar_dim: Style::default().fg(Color::Gray).bg(Color::DarkGray),
-            mode_normal: Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD),
-            mode_search: Style::default().fg(Color::White).bg(Color::Green).add_modifier(Modifier::BOLD),
+            mode_normal: Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+            mode_search: Style::default()
+                .fg(Color::White)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
             search_input: Style::default().fg(Color::Black).bg(Color::Gray),
             search_cursor: Style::default().fg(Color::White).bg(Color::Black),
             popup_border: Style::default().fg(Color::Blue),
-            popup_title: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            popup_title: Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
             popup_text: Style::default().fg(Color::Black),
-            popup_key: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            popup_key: Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
             popup_desc: Style::default().fg(Color::DarkGray),
         }
     }
@@ -140,6 +189,7 @@ impl Theme {
         let yellow = Color::Rgb(249, 226, 175);
 
         Self {
+            background: Style::default(),
             border: Style::default().fg(overlay),
             border_selected: Style::default().fg(mauve).add_modifier(Modifier::BOLD),
             border_marked: Style::default().fg(green).add_modifier(Modifier::BOLD),
@@ -149,8 +199,14 @@ impl Theme {
             status_bar: Style::default().fg(text).bg(surface0),
             status_bar_error: Style::default().fg(base).bg(red),
             status_bar_dim: Style::default().fg(overlay).bg(surface0),
-            mode_normal: Style::default().fg(base).bg(mauve).add_modifier(Modifier::BOLD),
-            mode_search: Style::default().fg(base).bg(green).add_modifier(Modifier::BOLD),
+            mode_normal: Style::default()
+                .fg(base)
+                .bg(mauve)
+                .add_modifier(Modifier::BOLD),
+            mode_search: Style::default()
+                .fg(base)
+                .bg(green)
+                .add_modifier(Modifier::BOLD),
             search_input: Style::default().fg(text).bg(surface0),
             search_cursor: Style::default().fg(base).bg(mauve),
             popup_border: Style::default().fg(mauve),
@@ -173,21 +229,32 @@ impl Theme {
         let aurora_yellow = Color::Rgb(235, 203, 139);
 
         Self {
+            background: Style::default(),
             border: Style::default().fg(polar3),
             border_selected: Style::default().fg(frost_blue).add_modifier(Modifier::BOLD),
-            border_marked: Style::default().fg(aurora_green).add_modifier(Modifier::BOLD),
+            border_marked: Style::default()
+                .fg(aurora_green)
+                .add_modifier(Modifier::BOLD),
             title: Style::default().fg(frost_blue).add_modifier(Modifier::BOLD),
             label: Style::default().fg(snow0),
             label_selected: Style::default().fg(frost_blue),
             status_bar: Style::default().fg(snow1).bg(polar2),
             status_bar_error: Style::default().fg(polar0).bg(aurora_red),
             status_bar_dim: Style::default().fg(polar3).bg(polar2),
-            mode_normal: Style::default().fg(polar0).bg(frost_blue).add_modifier(Modifier::BOLD),
-            mode_search: Style::default().fg(polar0).bg(aurora_green).add_modifier(Modifier::BOLD),
+            mode_normal: Style::default()
+                .fg(polar0)
+                .bg(frost_blue)
+                .add_modifier(Modifier::BOLD),
+            mode_search: Style::default()
+                .fg(polar0)
+                .bg(aurora_green)
+                .add_modifier(Modifier::BOLD),
             search_input: Style::default().fg(snow0).bg(polar2),
             search_cursor: Style::default().fg(polar0).bg(frost_blue),
             popup_border: Style::default().fg(frost_blue),
-            popup_title: Style::default().fg(aurora_yellow).add_modifier(Modifier::BOLD),
+            popup_title: Style::default()
+                .fg(aurora_yellow)
+                .add_modifier(Modifier::BOLD),
             popup_text: Style::default().fg(snow0),
             popup_key: Style::default().fg(frost_blue).add_modifier(Modifier::BOLD),
             popup_desc: Style::default().fg(snow0),
@@ -198,5 +265,32 @@ impl Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self::tokyonight()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Theme;
+    use ratatui::style::Color;
+
+    #[test]
+    fn tokyonight_uses_the_moon_palette() {
+        let theme = Theme::tokyonight();
+
+        assert_eq!(theme.background.bg, Some(Color::Rgb(0x22, 0x24, 0x36)));
+        assert_eq!(theme.border.fg, Some(Color::Rgb(0x54, 0x5c, 0x7e)));
+        assert_eq!(theme.border_selected.fg, Some(Color::Rgb(0xc0, 0x99, 0xff)));
+        assert_eq!(theme.title.fg, Some(Color::Rgb(0x82, 0xaa, 0xff)));
+        assert_eq!(theme.label.fg, Some(Color::Rgb(0xc8, 0xd3, 0xf5)));
+        assert_eq!(theme.label_selected.fg, Some(Color::Rgb(0xc0, 0x99, 0xff)));
+        assert_eq!(theme.status_bar.bg, Some(Color::Rgb(0x1e, 0x20, 0x30)));
+        assert_eq!(
+            theme.status_bar_error.bg,
+            Some(Color::Rgb(0xff, 0x75, 0x7f))
+        );
+        assert_eq!(theme.mode_search.bg, Some(Color::Rgb(0x4f, 0xd6, 0xbe)));
+        assert_eq!(theme.search_input.bg, Some(Color::Rgb(0x2f, 0x33, 0x4d)));
+        assert_eq!(theme.popup_border.fg, Some(Color::Rgb(0xc0, 0x99, 0xff)));
+        assert_eq!(theme.popup_title.fg, Some(Color::Rgb(0xff, 0xc7, 0x77)));
     }
 }

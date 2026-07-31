@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    frame.render_widget(Block::default().style(app.theme.background), frame.area());
     match app.mode {
         ViewMode::Gallery => draw_gallery(frame, app),
         ViewMode::Fullscreen => draw_fullscreen(frame, app),
@@ -42,14 +43,8 @@ fn draw_picker(frame: &mut Frame, app: &mut App) {
         let total = picker.entries.len();
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("/{}\u{2588}", picker.filter),
-                    theme.search_input,
-                ),
-                Span::styled(
-                    format!("  {match_count}/{total} matches"),
-                    theme.popup_desc,
-                ),
+                Span::styled(format!("/{}\u{2588}", picker.filter), theme.search_input),
+                Span::styled(format!("  {match_count}/{total} matches"), theme.popup_desc),
             ])),
             filter_inner,
         );
@@ -141,8 +136,15 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
     let bottom_line = if let Some(ref pending) = app.pending_delete {
         Line::from(Span::styled(
             format!(
-                " Delete {}? [y/N] ",
-                pending.paths.first()
+                " {} {}? [y/N] ",
+                if pending.permanent {
+                    "Permanently delete"
+                } else {
+                    "Move to trash"
+                },
+                pending
+                    .paths
+                    .first()
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| format!("{} files", pending.paths.len())),
@@ -150,9 +152,15 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
             theme.status_bar_error,
         ))
     } else if let Some(ref err) = app.delete_error {
-        Line::from(Span::styled(format!(" Delete error: {err} "), theme.status_bar_error))
+        Line::from(Span::styled(
+            format!(" Delete error: {err} "),
+            theme.status_bar_error,
+        ))
     } else if let Some(ref err) = app.error {
-        Line::from(Span::styled(format!(" Error: {err} "), theme.status_bar_error))
+        Line::from(Span::styled(
+            format!(" Error: {err} "),
+            theme.status_bar_error,
+        ))
     } else {
         let dims = app
             .loaded
@@ -216,7 +224,10 @@ fn draw_video(frame: &mut Frame, app: &mut App) {
     };
 
     let bottom_line = if let Some(ref err) = app.error {
-        Line::from(Span::styled(format!(" Error: {err} "), theme.status_bar_error))
+        Line::from(Span::styled(
+            format!(" Error: {err} "),
+            theme.status_bar_error,
+        ))
     } else {
         Line::from(vec![
             Span::styled(
@@ -279,10 +290,7 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
                     format!("/{}\u{2588}", app.gallery.search_query),
                     theme.search_input,
                 ),
-                Span::styled(
-                    format!("  {match_count}/{total} matches"),
-                    theme.popup_desc,
-                ),
+                Span::styled(format!("  {match_count}/{total} matches"), theme.popup_desc),
             ])),
             search_inner,
         );
@@ -300,7 +308,11 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
 
     let filtered_count = app.gallery.filtered_indices.len();
     let total = app.images.len();
-    let scanning = if app.is_scanning() { ", scanning\u{2026}" } else { "" };
+    let scanning = if app.is_scanning() {
+        ", scanning\u{2026}"
+    } else {
+        ""
+    };
     let gallery_title = if app.gallery.search_query.is_empty() {
         format!(" Gallery [{total} images{scanning}] ")
     } else {
@@ -315,14 +327,19 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
         .unwrap_or_default();
 
     let bottom_line = if let Some(ref pending) = app.pending_delete {
+        let action = if pending.permanent {
+            "Permanently delete"
+        } else {
+            "Move to trash"
+        };
         let prompt = if pending.paths.len() == 1 {
             let name = pending.paths[0]
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            format!(" Delete {name}? ")
+            format!(" {action} {name}? ")
         } else {
-            format!(" Delete {} files? ", pending.paths.len())
+            format!(" {action} {} files? ", pending.paths.len())
         };
         Line::from(vec![
             Span::styled(prompt, theme.status_bar_error),
@@ -333,11 +350,16 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
             format!(" Delete error: {err} "),
             theme.status_bar_error,
         ))
+    } else if let Some(ref err) = app.error {
+        Line::from(Span::styled(
+            format!(" Error: {err} "),
+            theme.status_bar_error,
+        ))
     } else {
         let hint = if app.gallery.search_active {
             " Esc: cancel  Enter: confirm "
         } else {
-            " Enter: open  Space: mark  d: delete  o: browse  /: search  ?: help  q: quit "
+            " Enter: open  Space: mark  d: trash  D: delete  o: browse  /: search  ?: help  q: quit "
         };
         if filtered_count == 0 {
             Line::from(Span::styled(hint, theme.popup_desc))
@@ -406,7 +428,10 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
         let prefix_len = if is_marked { 2 } else { 0 };
         let max_label = (THUMB_COLS as usize).saturating_sub(2 + prefix_len);
         let trimmed = if raw_filename.chars().count() > max_label {
-            let head: String = raw_filename.chars().take(max_label.saturating_sub(1)).collect();
+            let head: String = raw_filename
+                .chars()
+                .take(max_label.saturating_sub(1))
+                .collect();
             format!("{head}\u{2026}")
         } else {
             raw_filename
@@ -452,7 +477,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("Enter", "Open fullscreen"),
         ("Space", "Toggle selection"),
         ("a / A", "Select all / clear all"),
-        ("d", "Delete selection or cursor"),
+        ("d / D", "Trash / permanently delete selection"),
         ("o", "Open directory picker"),
         ("/", "Search"),
         ("?", "Toggle help"),
@@ -468,7 +493,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("\u{2190} / \u{2192}", "Previous / next image"),
         ("h / l", "Previous / next image"),
         ("Home / End", "Jump to first / last"),
-        ("d", "Delete current image"),
+        ("d / D", "Trash / permanently delete image"),
         ("Esc", "Back to gallery"),
         ("?", "Toggle help"),
         ("q", "Quit"),

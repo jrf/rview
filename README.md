@@ -45,7 +45,8 @@ rview -t catppuccin ~/photos/      # choose theme
 | `Enter` | Open fullscreen |
 | `Space` | Toggle selection at cursor |
 | `a` `A` | Select all filtered / clear selection |
-| `d` | Delete selection (or cursor image), with confirm |
+| `d` | Move selection (or cursor image) to Trash, with confirm |
+| `D` | Permanently delete selection (or cursor image), with confirm |
 | `o` | Open directory picker |
 | `/` | Search filenames |
 | `?` | Help |
@@ -78,7 +79,8 @@ rview -t catppuccin ~/photos/      # choose theme
 |-----|--------|
 | `h` `l` `←` `→` | Previous / next image |
 | `Home` `End` | Jump to first / last |
-| `d` | Delete current image, with confirm |
+| `d` | Move current image to Trash, with confirm |
+| `D` | Permanently delete current image, with confirm |
 | `Esc` | Back to gallery |
 | `?` | Help |
 | `q` | Quit |
@@ -103,7 +105,7 @@ rview -t nord
 
 ## Supported Formats
 
-**Images:** PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, AVIF, and more via the [image](https://crates.io/crates/image) crate.
+**Images:** PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, and AVIF.
 
 **Video** (with `video` feature): MP4, MOV, MKV, AVI, WebM, M4V. Videos play at up to 10fps using PNG-encoded frames over the Kitty protocol. Videos loop automatically and show first-frame thumbnails in the gallery.
 
@@ -117,6 +119,16 @@ A terminal with [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphi
 
 For video support: system ffmpeg libraries (ffmpeg 7+).
 
+## Development
+
+Run the complete local validation suite with:
+
+```bash
+just check-all
+```
+
+The suite checks formatting, runs Clippy with warnings denied, and tests both the default and video-enabled feature sets. Use `just check` when FFmpeg is unavailable to validate the default feature set only.
+
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

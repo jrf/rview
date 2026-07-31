@@ -16,7 +16,13 @@
 ## Done
 
 - [x] Directory picker (o) with fuzzy filter, switches gallery to chosen dir #feature
-- [x] Multi-select and permanent delete with confirm prompt (Space, a/A, d) #feature
+- [x] Multi-select with confirmation prompts (Space, a/A, d/D) #feature
+- [x] Recoverable Trash deletion by default with explicit permanent deletion (d/D) #improvement
+- [x] Terminal lifecycle guard for cleanup on error and panic paths #bug
+- [x] Deterministic incremental directory scan batches with surfaced errors #improvement
+- [x] Bounded, platform-aware thumbnail disk cache with atomic writes #improvement
+- [x] Graphics backend boundary for future protocol support #refactor
+- [x] Unit tests, formatting and Clippy gates, and GitHub Actions CI #chore
 - [x] Large directory scaling (streaming background scanner, incremental display) #improvement
 - [x] Kitty graphics protocol encoding #feature
 - [x] CLI arg parsing with clap #feature

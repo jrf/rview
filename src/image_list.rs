@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 struct Inner {
     paths: Vec<PathBuf>,
     filenames: Vec<String>,
+    errors: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -20,6 +21,7 @@ impl SharedImageList {
             inner: Arc::new(Mutex::new(Inner {
                 paths: Vec::new(),
                 filenames: Vec::new(),
+                errors: Vec::new(),
             })),
             len: Arc::new(AtomicUsize::new(0)),
             complete: Arc::new(AtomicBool::new(false)),
@@ -43,6 +45,14 @@ impl SharedImageList {
         self.complete.store(true, Ordering::Release);
     }
 
+    pub fn push_error(&self, error: String) {
+        self.inner.lock().unwrap().errors.push(error);
+    }
+
+    pub fn drain_errors(&self) -> Vec<String> {
+        std::mem::take(&mut self.inner.lock().unwrap().errors)
+    }
+
     pub fn is_complete(&self) -> bool {
         self.complete.load(Ordering::Acquire)
     }
@@ -63,5 +73,28 @@ impl SharedImageList {
         inner.paths = paths;
         inner.filenames = filenames;
         self.len.store(inner.paths.len(), Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedImageList;
+    use std::path::PathBuf;
+
+    #[test]
+    fn paths_and_filenames_remain_aligned() {
+        let list = SharedImageList::new();
+        list.push_batch(vec![PathBuf::from("synthetic-a.png")]);
+        let (paths, filenames) = list.drain_since(0);
+        assert_eq!(paths, vec![PathBuf::from("synthetic-a.png")]);
+        assert_eq!(filenames, vec!["synthetic-a.png"]);
+    }
+
+    #[test]
+    fn errors_are_drained_once() {
+        let list = SharedImageList::new();
+        list.push_error("synthetic scanner error".into());
+        assert_eq!(list.drain_errors(), vec!["synthetic scanner error"]);
+        assert!(list.drain_errors().is_empty());
     }
 }
