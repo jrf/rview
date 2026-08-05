@@ -550,7 +550,7 @@ fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
                 app.switch_to_dir(t);
             }
         }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+        KeyCode::Right | KeyCode::Char('l') => {
             let target = app.picker.as_mut().and_then(|p| {
                 let sel = p.selected()?;
                 if sel.is_parent {
@@ -560,6 +560,17 @@ fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
             });
             if let Some(t) = target {
                 app.switch_to_dir(t);
+            }
+        }
+        KeyCode::Enter => {
+            let target = app
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.selected())
+                .map(|entry| entry.path.clone());
+            if let Some(target) = target {
+                app.switch_to_dir(target);
+                app.close_picker();
             }
         }
         KeyCode::Char('/') => {
@@ -746,4 +757,81 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
         app.transmitted_image_ids.insert(id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, KeyCode, SharedImageList, ViewMode, handle_picker_key};
+    use crate::theme::Theme;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn picker_app(root: &Path) -> App {
+        let list = SharedImageList::new();
+        let mut app = App::new(Theme::default(), (8, 16), list);
+        app.initial_dir = Some(root.to_path_buf());
+        app.open_picker();
+        app
+    }
+
+    fn synthetic_tree(test_name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "rview-synthetic-{test_name}-{}",
+            std::process::id()
+        ));
+        let child = root.join("synthetic-images");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&child).unwrap();
+        (
+            fs::canonicalize(root).unwrap(),
+            fs::canonicalize(child).unwrap(),
+        )
+    }
+
+    fn select_path(app: &mut App, target: &Path) {
+        let picker = app.picker.as_mut().unwrap();
+        let entry_index = picker
+            .entries
+            .iter()
+            .position(|entry| entry.path == target)
+            .unwrap();
+        picker.cursor = picker
+            .filtered_indices
+            .iter()
+            .position(|index| *index == entry_index)
+            .unwrap();
+    }
+
+    #[test]
+    fn enter_chooses_directory_and_closes_picker() {
+        let (root, child) = synthetic_tree("choose-directory");
+        let mut app = picker_app(&root);
+        select_path(&mut app, &child);
+
+        assert!(!handle_picker_key(&mut app, KeyCode::Enter).unwrap());
+        assert_eq!(app.mode, ViewMode::Gallery);
+        assert!(app.picker.is_none());
+        assert_eq!(app.current_dir, Some(fs::canonicalize(&child).unwrap()));
+
+        std::thread::sleep(Duration::from_millis(20));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn right_descends_without_closing_picker() {
+        let (root, child) = synthetic_tree("descend-directory");
+        let mut app = picker_app(&root);
+        select_path(&mut app, &child);
+
+        assert!(!handle_picker_key(&mut app, KeyCode::Right).unwrap());
+        assert_eq!(app.mode, ViewMode::Picker);
+        assert_eq!(
+            app.picker.as_ref().map(|picker| &picker.current_dir),
+            Some(&fs::canonicalize(&child).unwrap())
+        );
+
+        std::thread::sleep(Duration::from_millis(20));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

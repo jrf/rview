@@ -74,7 +74,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App) {
     let hint = if picker.filter_active {
         " Esc: cancel  Enter: confirm  Backspace: delete "
     } else {
-        " Enter/l: open  h: parent  /: filter  ?: help  Esc: gallery  q: quit "
+        " Enter: choose  l: descend  h: parent  /: filter  ?: help  Esc: gallery  q: quit "
     };
 
     let bottom_line = if let Some(ref err) = picker.error {
@@ -500,7 +500,8 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("", ""),
         ("", "Directory picker"),
         ("j / k", "Move cursor"),
-        ("Enter / l", "Open directory"),
+        ("Enter", "Choose directory and open gallery"),
+        ("l / Right", "Descend into directory"),
         ("h", "Parent directory"),
         ("g / G", "First / last"),
         ("/", "Filter names"),

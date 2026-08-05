@@ -57,7 +57,8 @@ rview -t catppuccin ~/photos/      # choose theme
 | Key | Action |
 |-----|--------|
 | `j` `k` `↑` `↓` | Move cursor |
-| `Enter` `l` `→` | Open highlighted directory |
+| `Enter` | Choose highlighted directory and open its gallery |
+| `l` `→` | Descend into highlighted directory |
 | `h` `←` | Go to parent directory |
 | `g` `G` `Home` `End` | First / last |
 | `/` | Filter directory names (fuzzy) |
