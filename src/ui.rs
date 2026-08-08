@@ -23,36 +23,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_theme_picker(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let max_name = app
-        .themes
-        .iter()
-        .map(|theme| theme.name.chars().count())
-        .max()
-        .unwrap_or(16);
-    let width = (max_name as u16 + 8)
-        .max(28)
-        .min(area.width.saturating_sub(4).max(1));
-    let height = (app.themes.len() as u16 + 4)
-        .max(5)
-        .min(area.height.saturating_sub(4).max(1));
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
+    let popup = picker_rect(area);
+    frame.render_widget(Block::default().style(app.theme.picker_backdrop), area);
+    frame.render_widget(Clear, popup);
+
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(app.theme.picker_surface)
         .border_style(app.theme.popup_border)
-        .title(Line::from(Span::styled(" Theme ", app.theme.popup_title)));
+        .title(Line::from(Span::styled(" Themes ", app.theme.popup_title)));
     let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
     let visible = chunks[0].height.max(1) as usize;
     let (selected, scroll) = {
         let picker = app.theme_picker.as_mut().expect("theme picker");
+        picker.visible_height = visible;
         if picker.selected < picker.scroll {
             picker.scroll = picker.selected;
         } else if picker.selected >= picker.scroll + visible {
@@ -70,32 +57,78 @@ fn draw_theme_picker(frame: &mut Frame, app: &mut App) {
         .take(visible)
         .map(|(index, theme)| {
             let is_selected = index == selected;
-            let marker = if is_selected { "▶" } else { " " };
-            let label = format!(
-                " {marker} {:<width$}",
-                theme.name,
-                width = row_width.saturating_sub(4)
-            );
-            let style = if is_selected {
-                app.theme.search_input.add_modifier(Modifier::BOLD)
+            let row_style = if is_selected {
+                app.theme.picker_selection.add_modifier(Modifier::BOLD)
             } else {
-                app.theme.popup_text
+                app.theme.picker_surface
             };
-            Line::from(Span::styled(label, style))
+            let marker_style = if is_selected {
+                app.theme.picker_selection.patch(app.theme.popup_key)
+            } else {
+                app.theme.picker_surface
+            };
+            let mut line = Line::from(vec![
+                Span::styled(if is_selected { "▌ " } else { "  " }, marker_style),
+                Span::styled(theme.name.clone(), row_style),
+            ]);
+            let used = line.width();
+            if used < row_width {
+                line.spans
+                    .push(Span::styled(" ".repeat(row_width - used), row_style));
+            }
+            line
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), chunks[0]);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" j/k", app.theme.popup_key),
-            Span::styled(":preview  ", app.theme.popup_desc),
-            Span::styled("enter", app.theme.popup_key),
-            Span::styled(":apply  ", app.theme.popup_desc),
-            Span::styled("esc", app.theme.popup_key),
-            Span::styled(":cancel", app.theme.popup_desc),
-        ])),
+        Paragraph::new(lines).style(app.theme.picker_surface),
+        chunks[0],
+    );
+
+    let status = format!("{}/{}", selected + 1, app.themes.len());
+    let bindings = [("j/k", "preview"), ("enter", "apply"), ("esc", "cancel")];
+    let key_style = app.theme.picker_selection.patch(app.theme.popup_key);
+    let description_style = app.theme.picker_chrome.patch(app.theme.popup_desc);
+    let mut spans = vec![Span::styled(" ", app.theme.picker_chrome)];
+    for (key, action) in bindings {
+        spans.push(Span::styled(format!(" {key} "), key_style));
+        spans.push(Span::styled(format!(" {action}  "), description_style));
+    }
+    let used = spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>();
+    let status_width = status.chars().count();
+    let footer_width = usize::from(chunks[1].width);
+    if used + status_width < footer_width {
+        spans.push(Span::styled(
+            " ".repeat(footer_width - used - status_width),
+            app.theme.picker_chrome,
+        ));
+    }
+    spans.push(Span::styled(status, description_style));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(app.theme.picker_chrome),
         chunks[1],
     );
+}
+
+fn picker_rect(area: Rect) -> Rect {
+    let width = if area.width > 4 {
+        (area.width * 3 / 4).max(50).min(area.width - 4)
+    } else {
+        area.width.max(1)
+    };
+    let height = if area.height > 4 {
+        (area.height * 3 / 4).max(6).min(area.height - 2)
+    } else {
+        area.height.max(1)
+    };
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 fn draw_picker(frame: &mut Frame, app: &mut App) {
@@ -635,4 +668,59 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ))),
         chunks[1],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{draw_theme_picker, picker_rect};
+    use crate::app::App;
+    use crate::image_list::SharedImageList;
+    use crate::theme::{NamedTheme, Theme};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Style};
+
+    #[test]
+    fn theme_picker_uses_the_previewed_theme_and_pdfterm_layout() {
+        let first = Theme::fallback();
+        let mut preview = Theme::fallback();
+        preview.picker_backdrop = Style::default().bg(Color::Red);
+        preview.picker_selection = Style::default().fg(Color::White).bg(Color::Green);
+        preview.popup_border = Style::default().fg(Color::Blue);
+
+        let mut app = App::new(first.clone(), (8, 16), SharedImageList::new());
+        app.install_themes(
+            vec![
+                NamedTheme {
+                    name: "first".to_string(),
+                    path: None,
+                    theme: first,
+                },
+                NamedTheme {
+                    name: "preview".to_string(),
+                    path: None,
+                    theme: preview,
+                },
+            ],
+            0,
+        );
+        app.open_theme_picker();
+        app.theme_picker_select(1);
+
+        let area = Rect::new(0, 0, 80, 30);
+        let popup = picker_rect(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| draw_theme_picker(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(popup.width, 60);
+        assert_eq!(popup.height, 22);
+        assert_eq!(buffer[(0, 0)].bg, Color::Red);
+        assert_eq!(buffer[(popup.x, popup.y)].fg, Color::Blue);
+        assert_eq!(buffer[(popup.x + 1, popup.y + 2)].symbol(), "▌");
+        assert_eq!(buffer[(popup.x + 2, popup.y + 2)].bg, Color::Green);
+    }
 }

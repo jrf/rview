@@ -35,6 +35,7 @@ pub struct ThemePickerState {
     pub selected: usize,
     pub original_index: usize,
     pub scroll: usize,
+    pub visible_height: usize,
 }
 
 pub struct App {
@@ -163,6 +164,7 @@ impl App {
             selected: self.theme_index,
             original_index: self.theme_index,
             scroll: 0,
+            visible_height: 1,
         });
         self.needs_render = true;
     }

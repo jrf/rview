@@ -483,6 +483,7 @@ fn handle_theme_picker_key(app: &mut App, code: KeyCode) {
         return;
     };
     let selected = picker.selected;
+    let visible_height = picker.visible_height.max(1);
     let last = app.themes.len().saturating_sub(1);
     match code {
         KeyCode::Down | KeyCode::Char('j') => {
@@ -493,8 +494,10 @@ fn handle_theme_picker_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Home | KeyCode::Char('g') => app.theme_picker_select(0),
         KeyCode::End | KeyCode::Char('G') => app.theme_picker_select(last),
-        KeyCode::PageDown => app.theme_picker_select((selected + 10).min(last)),
-        KeyCode::PageUp => app.theme_picker_select(selected.saturating_sub(10)),
+        KeyCode::PageDown => {
+            app.theme_picker_select((selected + visible_height).min(last));
+        }
+        KeyCode::PageUp => app.theme_picker_select(selected.saturating_sub(visible_height)),
         KeyCode::Enter => app.theme_picker_confirm(),
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t') => app.theme_picker_cancel(),
         _ => {}
@@ -905,5 +908,29 @@ mod tests {
         app.theme_picker_cancel();
         assert_eq!(app.theme, second);
         assert_eq!(app.theme_index, 1);
+    }
+
+    #[test]
+    fn theme_picker_pages_by_the_visible_rows() {
+        let list = SharedImageList::new();
+        let theme = Theme::fallback();
+        let mut app = App::new(theme.clone(), (8, 16), list);
+        let themes = (0..12)
+            .map(|index| NamedTheme {
+                name: format!("theme-{index}"),
+                path: None,
+                theme: theme.clone(),
+            })
+            .collect();
+        app.install_themes(themes, 0);
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().visible_height = 5;
+
+        handle_theme_picker_key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.theme_picker.as_ref().unwrap().selected, 5);
+        handle_theme_picker_key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.theme_picker.as_ref().unwrap().selected, 10);
+        handle_theme_picker_key(&mut app, KeyCode::PageUp);
+        assert_eq!(app.theme_picker.as_ref().unwrap().selected, 5);
     }
 }

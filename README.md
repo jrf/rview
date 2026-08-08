@@ -76,6 +76,16 @@ rview -t ~/.config/themes/catppuccin-mocha.toml ~/photos/
 | `Esc` | Cancel and clear |
 | `Backspace` | Delete character |
 
+### Theme Picker
+
+| Key | Action |
+|-----|--------|
+| `j` `k` `↑` `↓` | Preview previous / next theme |
+| `g` `G` `Home` `End` | Jump to first / last theme |
+| `PageUp` `PageDown` | Move by one visible page |
+| `Enter` | Apply for the current session |
+| `Esc` `q` `t` | Cancel and restore the previous theme |
+
 ### Fullscreen
 
 | Key | Action |
