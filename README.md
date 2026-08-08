@@ -31,7 +31,7 @@ rview                              # current directory
 rview ~/photos/                    # specific directory
 rview image.png                    # single image (fullscreen)
 rview photo.jpg screenshot.png     # multiple files
-rview -t catppuccin ~/photos/      # choose theme
+rview -t ~/.config/themes/catppuccin-mocha.toml ~/photos/
 ```
 
 ## Controls
@@ -48,6 +48,7 @@ rview -t catppuccin ~/photos/      # choose theme
 | `d` | Move selection (or cursor image) to Trash, with confirm |
 | `D` | Permanently delete selection (or cursor image), with confirm |
 | `o` | Open directory picker |
+| `t` | Open session theme picker |
 | `/` | Search filenames |
 | `?` | Help |
 | `q` `Esc` | Quit |
@@ -62,6 +63,7 @@ rview -t catppuccin ~/photos/      # choose theme
 | `h` `←` | Go to parent directory |
 | `g` `G` `Home` `End` | First / last |
 | `/` | Filter directory names (fuzzy) |
+| `t` | Open session theme picker |
 | `Esc` | Back to gallery |
 | `q` | Quit |
 
@@ -82,6 +84,7 @@ rview -t catppuccin ~/photos/      # choose theme
 | `Home` `End` | Jump to first / last |
 | `d` | Move current image to Trash, with confirm |
 | `D` | Permanently delete current image, with confirm |
+| `t` | Open session theme picker |
 | `Esc` | Back to gallery |
 | `?` | Help |
 | `q` | Quit |
@@ -92,17 +95,28 @@ rview -t catppuccin ~/photos/      # choose theme
 |-----|--------|
 | `Space` | Pause / resume |
 | `h` `l` `←` `→` | Previous / next file |
+| `t` | Open session theme picker |
 | `Esc` | Back to gallery |
 | `?` | Help |
 | `q` | Quit |
 
 ## Themes
 
-Five built-in color themes: **tokyonight** (default), **dark**, **light**, **catppuccin**, **nord**.
+Rview reads two explicit paths from `~/.config/rview/config.toml`:
 
-```bash
-rview -t nord
+```toml
+theme = "~/.config/themes/tokyo-night-moon.toml"
+theme_catalog = "~/.config/themes/catalog.toml"
 ```
+
+`theme` is loaded directly at startup. `theme_catalog` contains a `themes = [...]`
+array of explicit file paths used by the picker; Rview never scans a theme
+directory. Press `t` to preview catalog themes, `Enter` to keep one for the
+current session, or `Esc` to restore the prior theme. Picker changes never
+rewrite `config.toml`; edit `theme` directly to change the startup theme.
+
+`--theme` accepts an explicit theme path or catalog name as a session-only
+startup override.
 
 ## Supported Formats
 

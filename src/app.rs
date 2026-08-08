@@ -5,7 +5,7 @@ use crate::picker::{self, PickerState};
 use crate::prefetch::Prefetcher;
 use crate::scanner;
 use crate::search;
-use crate::theme::Theme;
+use crate::theme::{NamedTheme, Theme};
 use directories::ProjectDirs;
 use fast_image_resize as fir;
 use image::{DynamicImage, ImageReader, RgbaImage};
@@ -31,11 +31,20 @@ pub struct PendingDelete {
     pub permanent: bool,
 }
 
+pub struct ThemePickerState {
+    pub selected: usize,
+    pub original_index: usize,
+    pub scroll: usize,
+}
+
 pub struct App {
     pub images: Vec<PathBuf>,
     pub filenames: Vec<String>,
     pub mode: ViewMode,
     pub theme: Theme,
+    pub themes: Vec<NamedTheme>,
+    pub theme_index: usize,
+    pub theme_picker: Option<ThemePickerState>,
     pub cell_px: (u32, u32),
     pub graphics: KittyBackend,
 
@@ -96,7 +105,14 @@ impl App {
             images: Vec::new(),
             filenames: Vec::new(),
             mode: ViewMode::Gallery,
+            themes: vec![NamedTheme {
+                name: "fallback".to_string(),
+                path: None,
+                theme: theme.clone(),
+            }],
             theme,
+            theme_index: 0,
+            theme_picker: None,
             cell_px,
             graphics: KittyBackend,
             gallery: GalleryState::new(0),
@@ -130,6 +146,51 @@ impl App {
             transmitted_image_ids: HashSet::new(),
             graphics_storage_dirty: false,
         }
+    }
+
+    pub fn install_themes(&mut self, themes: Vec<NamedTheme>, selected: usize) {
+        if themes.is_empty() {
+            return;
+        }
+        self.theme_index = selected.min(themes.len() - 1);
+        self.theme = themes[self.theme_index].theme.clone();
+        self.themes = themes;
+        self.needs_render = true;
+    }
+
+    pub fn open_theme_picker(&mut self) {
+        self.theme_picker = Some(ThemePickerState {
+            selected: self.theme_index,
+            original_index: self.theme_index,
+            scroll: 0,
+        });
+        self.needs_render = true;
+    }
+
+    pub fn theme_picker_select(&mut self, selected: usize) {
+        if selected >= self.themes.len() {
+            return;
+        }
+        if let Some(picker) = self.theme_picker.as_mut() {
+            picker.selected = selected;
+            self.theme_index = selected;
+            self.theme = self.themes[selected].theme.clone();
+            self.needs_render = true;
+        }
+    }
+
+    pub fn theme_picker_confirm(&mut self) {
+        self.theme_picker = None;
+        self.needs_render = true;
+    }
+
+    pub fn theme_picker_cancel(&mut self) {
+        let Some(picker) = self.theme_picker.take() else {
+            return;
+        };
+        self.theme_index = picker.original_index;
+        self.theme = self.themes[self.theme_index].theme.clone();
+        self.needs_render = true;
     }
 
     /// Wipe backend storage and drop transmitted-image tracking.

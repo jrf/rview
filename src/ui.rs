@@ -14,9 +14,88 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         #[cfg(feature = "video")]
         ViewMode::Video => draw_video(frame, app),
     }
-    if app.help_visible {
+    if app.theme_picker.is_some() {
+        draw_theme_picker(frame, app);
+    } else if app.help_visible {
         draw_help_popup(frame, app);
     }
+}
+
+fn draw_theme_picker(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let max_name = app
+        .themes
+        .iter()
+        .map(|theme| theme.name.chars().count())
+        .max()
+        .unwrap_or(16);
+    let width = (max_name as u16 + 8)
+        .max(28)
+        .min(area.width.saturating_sub(4).max(1));
+    let height = (app.themes.len() as u16 + 4)
+        .max(5)
+        .min(area.height.saturating_sub(4).max(1));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.popup_border)
+        .title(Line::from(Span::styled(" Theme ", app.theme.popup_title)));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let visible = chunks[0].height.max(1) as usize;
+    let (selected, scroll) = {
+        let picker = app.theme_picker.as_mut().expect("theme picker");
+        if picker.selected < picker.scroll {
+            picker.scroll = picker.selected;
+        } else if picker.selected >= picker.scroll + visible {
+            picker.scroll = picker.selected + 1 - visible;
+        }
+        (picker.selected, picker.scroll)
+    };
+
+    let row_width = chunks[0].width as usize;
+    let lines = app
+        .themes
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(index, theme)| {
+            let is_selected = index == selected;
+            let marker = if is_selected { "▶" } else { " " };
+            let label = format!(
+                " {marker} {:<width$}",
+                theme.name,
+                width = row_width.saturating_sub(4)
+            );
+            let style = if is_selected {
+                app.theme.search_input.add_modifier(Modifier::BOLD)
+            } else {
+                app.theme.popup_text
+            };
+            Line::from(Span::styled(label, style))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" j/k", app.theme.popup_key),
+            Span::styled(":preview  ", app.theme.popup_desc),
+            Span::styled("enter", app.theme.popup_key),
+            Span::styled(":apply  ", app.theme.popup_desc),
+            Span::styled("esc", app.theme.popup_key),
+            Span::styled(":cancel", app.theme.popup_desc),
+        ])),
+        chunks[1],
+    );
 }
 
 fn draw_picker(frame: &mut Frame, app: &mut App) {
@@ -74,7 +153,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App) {
     let hint = if picker.filter_active {
         " Esc: cancel  Enter: confirm  Backspace: delete "
     } else {
-        " Enter: choose  l: descend  h: parent  /: filter  ?: help  Esc: gallery  q: quit "
+        " Enter: choose  l: descend  h: parent  t: theme  /: filter  ?: help  Esc: gallery  q: quit "
     };
 
     let bottom_line = if let Some(ref err) = picker.error {
@@ -178,7 +257,7 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
                 theme.popup_text,
             ),
             Span::styled(
-                " Esc: gallery  \u{2190}/\u{2192}: navigate  ?: help  q: quit ",
+                " Esc: gallery  \u{2190}/\u{2192}: navigate  t: theme  ?: help  q: quit ",
                 theme.popup_desc,
             ),
         ])
@@ -244,7 +323,7 @@ fn draw_video(frame: &mut Frame, app: &mut App) {
                 theme.popup_text,
             ),
             Span::styled(
-                " Space: pause  Esc: gallery  \u{2190}/\u{2192}: navigate  q: quit ",
+                " Space: pause  Esc: gallery  \u{2190}/\u{2192}: navigate  t: theme  q: quit ",
                 theme.popup_desc,
             ),
         ])
@@ -359,7 +438,7 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
         let hint = if app.gallery.search_active {
             " Esc: cancel  Enter: confirm "
         } else {
-            " Enter: open  Space: mark  d: trash  D: delete  o: browse  /: search  ?: help  q: quit "
+            " Enter: open  Space: mark  d: trash  D: delete  o: browse  t: theme  /: search  ?: help  q: quit "
         };
         if filtered_count == 0 {
             Line::from(Span::styled(hint, theme.popup_desc))
@@ -479,6 +558,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("a / A", "Select all / clear all"),
         ("d / D", "Trash / permanently delete selection"),
         ("o", "Open directory picker"),
+        ("t", "Open session theme picker"),
         ("/", "Search"),
         ("?", "Toggle help"),
         ("q / Esc", "Quit"),
@@ -494,6 +574,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("h / l", "Previous / next image"),
         ("Home / End", "Jump to first / last"),
         ("d / D", "Trash / permanently delete image"),
+        ("t", "Open session theme picker"),
         ("Esc", "Back to gallery"),
         ("?", "Toggle help"),
         ("q", "Quit"),
@@ -504,6 +585,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("l / Right", "Descend into directory"),
         ("h", "Parent directory"),
         ("g / G", "First / last"),
+        ("t", "Open session theme picker"),
         ("/", "Filter names"),
         ("Esc", "Back to gallery"),
         ("q", "Quit"),

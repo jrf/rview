@@ -21,6 +21,8 @@ turbojpeg = { version = "1", optional = true }
 fast_image_resize = "6.0.0"
 directories = "6"
 trash = "5.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 ffmpeg = { version = "8", optional = true, package = "ffmpeg-next" }
 
 [features]

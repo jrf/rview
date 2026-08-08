@@ -32,9 +32,9 @@ struct Cli {
     /// Image file(s) or directory to display [default: .]
     files: Vec<PathBuf>,
 
-    /// Color theme (tokyonight, dark, light, catppuccin, nord)
-    #[arg(short, long, default_value = "tokyonight")]
-    theme: String,
+    /// Explicit theme file path or configured catalog name
+    #[arg(short, long)]
+    theme: Option<String>,
 
     /// Number of threads for image decoding [default: all cores]
     #[arg(short = 'j', long)]
@@ -142,14 +142,9 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let theme = theme::Theme::by_name(&cli.theme).unwrap_or_else(|| {
-        eprintln!(
-            "Unknown theme '{}'. Available: {}",
-            cli.theme,
-            theme::Theme::names().join(", ")
-        );
-        std::process::exit(1);
-    });
+    let theme_set = theme::load_themes(cli.theme.as_deref())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let theme = theme_set.themes[theme_set.selected].theme.clone();
 
     let initial_dir = initial_dir_from_paths(&paths);
 
@@ -160,6 +155,7 @@ fn main() -> io::Result<()> {
 
     let cell_px = query_cell_pixel_size();
     let mut app = App::new(theme, cell_px, shared_list);
+    app.install_themes(theme_set.themes, theme_set.selected);
     app.initial_dir = Some(initial_dir);
     let run_result = run(session.terminal_mut(), &mut app);
     let restore_result = session.restore();
@@ -219,7 +215,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         // 4. Render Kitty images
-        if app.mode == ViewMode::Picker {
+        if app.theme_picker.is_some() || app.mode == ViewMode::Picker {
             app.needs_render = false;
             pending_emits.clear();
         } else if app.needs_render && !app.images.is_empty() {
@@ -297,6 +293,18 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                     }
                     _ => {}
                 }
+            } else if app.theme_picker.is_some() {
+                handle_theme_picker_key(app, key.code);
+            } else if key.code == KeyCode::Char('t')
+                && !(app.mode == ViewMode::Gallery && app.gallery.search_active)
+                && !(app.mode == ViewMode::Picker
+                    && app
+                        .picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.filter_active))
+            {
+                app.graphics_delete_all()?;
+                app.open_theme_picker();
             } else {
                 match app.mode {
                     ViewMode::Fullscreen => match key.code {
@@ -468,6 +476,29 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
         _ => {}
     }
     Ok(false)
+}
+
+fn handle_theme_picker_key(app: &mut App, code: KeyCode) {
+    let Some(picker) = app.theme_picker.as_ref() else {
+        return;
+    };
+    let selected = picker.selected;
+    let last = app.themes.len().saturating_sub(1);
+    match code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.theme_picker_select(if selected == last { 0 } else { selected + 1 });
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.theme_picker_select(if selected == 0 { last } else { selected - 1 });
+        }
+        KeyCode::Home | KeyCode::Char('g') => app.theme_picker_select(0),
+        KeyCode::End | KeyCode::Char('G') => app.theme_picker_select(last),
+        KeyCode::PageDown => app.theme_picker_select((selected + 10).min(last)),
+        KeyCode::PageUp => app.theme_picker_select(selected.saturating_sub(10)),
+        KeyCode::Enter => app.theme_picker_confirm(),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t') => app.theme_picker_cancel(),
+        _ => {}
+    }
 }
 
 fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
@@ -761,8 +792,11 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, KeyCode, SharedImageList, ViewMode, handle_picker_key};
-    use crate::theme::Theme;
+    use super::{
+        App, KeyCode, SharedImageList, ViewMode, handle_picker_key, handle_theme_picker_key,
+    };
+    use crate::theme::{NamedTheme, Theme};
+    use ratatui::style::{Color, Style};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -833,5 +867,43 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(20));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn theme_picker_applies_for_the_session_and_cancel_restores() {
+        let list = SharedImageList::new();
+        let first = Theme::fallback();
+        let mut second = Theme::fallback();
+        second.title = Style::default().fg(Color::Red);
+        let mut app = App::new(first.clone(), (8, 16), list);
+        app.install_themes(
+            vec![
+                NamedTheme {
+                    name: "first".to_string(),
+                    path: None,
+                    theme: first.clone(),
+                },
+                NamedTheme {
+                    name: "second".to_string(),
+                    path: None,
+                    theme: second.clone(),
+                },
+            ],
+            0,
+        );
+
+        app.open_theme_picker();
+        handle_theme_picker_key(&mut app, KeyCode::Down);
+        assert_eq!(app.theme, second);
+        app.theme_picker_confirm();
+        assert_eq!(app.theme_index, 1);
+        assert!(app.theme_picker.is_none());
+
+        app.open_theme_picker();
+        handle_theme_picker_key(&mut app, KeyCode::Up);
+        assert_eq!(app.theme, first);
+        app.theme_picker_cancel();
+        assert_eq!(app.theme, second);
+        assert_eq!(app.theme_index, 1);
     }
 }
