@@ -193,6 +193,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         app.refresh_from_scanner();
         app.poll_filter();
         app.poll_fullscreen();
+        app.poll_source();
         app.prefetcher.poll();
         pending_emits.extend(app.poll_thumbnails());
 
@@ -317,6 +318,13 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                             app.graphics_delete_all()?;
                             app.enter_gallery();
                         }
+                        KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_in(),
+                        KeyCode::Char('-') | KeyCode::Char('_') => app.zoom_out(),
+                        KeyCode::Char('0') => app.reset_zoom(),
+                        KeyCode::Left | KeyCode::Char('h') if app.zoom > 1.0 => app.pan(-1.0, 0.0),
+                        KeyCode::Right | KeyCode::Char('l') if app.zoom > 1.0 => app.pan(1.0, 0.0),
+                        KeyCode::Up | KeyCode::Char('k') if app.zoom > 1.0 => app.pan(0.0, -1.0),
+                        KeyCode::Down | KeyCode::Char('j') if app.zoom > 1.0 => app.pan(0.0, 1.0),
                         KeyCode::Left | KeyCode::Char('h') => app.prev(),
                         KeyCode::Right | KeyCode::Char('l') => app.next(),
                         KeyCode::Home => {
@@ -643,7 +651,13 @@ fn query_cell_pixel_size() -> (u32, u32) {
 }
 
 fn render_fullscreen_image(app: &mut App) -> io::Result<()> {
+    use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+
     let mut out = io::stdout().lock();
+    // Wrap the delete + retransmit in a synchronized update so the terminal swaps
+    // atomically instead of briefly showing a blank viewport (visible as flicker
+    // when zooming or panning, which redraw rapidly).
+    queue!(out, BeginSynchronizedUpdate)?;
     app.graphics_delete_all_to(&mut out)?;
 
     if let Some(ref img) = app.loaded {
@@ -667,6 +681,7 @@ fn render_fullscreen_image(app: &mut App) -> io::Result<()> {
         )?;
     }
 
+    queue!(out, EndSynchronizedUpdate)?;
     out.flush()
 }
 

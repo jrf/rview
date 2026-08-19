@@ -91,6 +91,9 @@ rview -t ~/.config/themes/catppuccin-mocha.toml ~/photos/
 | Key | Action |
 |-----|--------|
 | `h` `l` `←` `→` | Previous / next image |
+| `+` `-` | Zoom in / out |
+| `0` | Reset zoom to fit |
+| `h` `j` `k` `l` | Pan when zoomed in |
 | `Home` `End` | Jump to first / last |
 | `d` | Move current image to Trash, with confirm |
 | `D` | Permanently delete current image, with confirm |

@@ -16,6 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, mpsc};
 
+/// Multiplier applied on each zoom step.
+const ZOOM_STEP: f64 = 1.25;
+/// Maximum zoom factor (relative to fit-to-window).
+const MAX_ZOOM: f64 = 16.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Gallery,
@@ -74,6 +79,17 @@ pub struct App {
     // Async fullscreen decode
     fullscreen_rx: Option<mpsc::Receiver<io::Result<RgbaImage>>>,
     fullscreen_target: Option<(usize, Rect)>,
+
+    // Fullscreen zoom / pan
+    pub zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+    zoom_dirty: bool,
+    /// Full-resolution decoded source for the current fullscreen image, used for zoomed crops.
+    source: Option<DynamicImage>,
+    source_for: Option<usize>,
+    source_rx: Option<mpsc::Receiver<io::Result<DynamicImage>>>,
+    source_target: Option<usize>,
 
     #[cfg(feature = "video")]
     pub video: Option<crate::video::VideoPlayback>,
@@ -134,6 +150,14 @@ impl App {
             loaded_for_rect: Rect::default(),
             fullscreen_rx: None,
             fullscreen_target: None,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            zoom_dirty: false,
+            source: None,
+            source_for: None,
+            source_rx: None,
+            source_target: None,
             #[cfg(feature = "video")]
             video: None,
             shared_list,
@@ -345,6 +369,7 @@ impl App {
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
             self.loaded = None;
+            self.reset_zoom_state();
         }
     }
 
@@ -420,6 +445,98 @@ impl App {
             }
             self.fullscreen_rx = None;
             self.fullscreen_target = None;
+            return true;
+        }
+        false
+    }
+
+    /// Reset zoom/pan and drop the cached full-resolution source. Called when the
+    /// current fullscreen image changes.
+    fn reset_zoom_state(&mut self) {
+        self.zoom = 1.0;
+        self.pan_x = 0.5;
+        self.pan_y = 0.5;
+        self.zoom_dirty = false;
+        self.source = None;
+        self.source_for = None;
+        self.source_rx = None;
+        self.source_target = None;
+    }
+
+    /// Return to fit-to-window, keeping the cached source for fast re-zoom.
+    pub fn reset_zoom(&mut self) {
+        if self.zoom == 1.0 {
+            return;
+        }
+        self.zoom = 1.0;
+        self.pan_x = 0.5;
+        self.pan_y = 0.5;
+        self.zoom_dirty = true;
+        self.needs_render = true;
+    }
+
+    pub fn zoom_in(&mut self) {
+        let new = (self.zoom * ZOOM_STEP).min(MAX_ZOOM);
+        if new != self.zoom {
+            self.zoom = new;
+            self.clamp_pan();
+            self.zoom_dirty = true;
+            self.needs_render = true;
+        }
+    }
+
+    pub fn zoom_out(&mut self) {
+        let new = (self.zoom / ZOOM_STEP).max(1.0);
+        if new != self.zoom {
+            self.zoom = new;
+            self.clamp_pan();
+            self.zoom_dirty = true;
+            self.needs_render = true;
+        }
+    }
+
+    /// Pan the zoomed view. `dx`/`dy` are direction multipliers (usually -1, 0, or 1).
+    pub fn pan(&mut self, dx: f64, dy: f64) {
+        if self.zoom <= 1.0 {
+            return;
+        }
+        let step = 0.15 / self.zoom;
+        self.pan_x += dx * step;
+        self.pan_y += dy * step;
+        self.clamp_pan();
+        self.zoom_dirty = true;
+        self.needs_render = true;
+    }
+
+    fn clamp_pan(&mut self) {
+        self.pan_x = self.pan_x.clamp(0.0, 1.0);
+        self.pan_y = self.pan_y.clamp(0.0, 1.0);
+    }
+
+    fn start_source_decode(&mut self, idx: usize) {
+        let (tx, rx) = mpsc::channel();
+        self.source_rx = Some(rx);
+        self.source_target = Some(idx);
+        let path = self.images[idx].clone();
+        rayon::spawn(move || {
+            let _ = tx.send(decode_image_with_hint(&path, None));
+        });
+    }
+
+    /// Receive an async full-resolution source decode for zooming.
+    pub fn poll_source(&mut self) -> bool {
+        let result = self.source_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = result {
+            let idx = self.source_target.take();
+            self.source_rx = None;
+            if let (Some(idx), Ok(img)) = (idx, result) {
+                if idx == self.current {
+                    self.source = Some(img);
+                    self.source_for = Some(idx);
+                    self.zoom_dirty = true;
+                    self.needs_render = true;
+                }
+            }
             return true;
         }
         false
@@ -703,6 +820,7 @@ impl App {
         self.needs_render = true;
         self.fullscreen_rx = None;
         self.fullscreen_target = None;
+        self.reset_zoom_state();
 
         #[cfg(feature = "video")]
         if crate::video::is_video(&self.images[self.current]) {
@@ -787,9 +905,38 @@ impl App {
     }
 
     pub fn load_if_needed(&mut self) {
-        if self.loaded.is_some() && self.loaded_for_rect == self.image_rect {
+        // Zoomed view: crop the full-resolution source around the pan point and
+        // resize that crop to fill the viewport.
+        if self.zoom > 1.0 {
+            if self.source_for == Some(self.current) {
+                if self.zoom_dirty
+                    || self.loaded.is_none()
+                    || self.loaded_for_rect != self.image_rect
+                {
+                    if let Some(view) = self.build_zoom_view() {
+                        self.loaded = Some(view);
+                        self.error = None;
+                        self.loaded_for_rect = self.image_rect;
+                        self.zoom_dirty = false;
+                    }
+                }
+                return;
+            }
+            // Source not decoded yet: request it and keep showing the fit image
+            // until it arrives (poll_source will trigger the rebuild).
+            if self.source_target != Some(self.current) {
+                self.start_source_decode(self.current);
+            }
+            self.zoom_dirty = false;
+            if self.loaded.is_some() {
+                return;
+            }
+        }
+
+        if self.loaded.is_some() && self.loaded_for_rect == self.image_rect && !self.zoom_dirty {
             return;
         }
+        self.zoom_dirty = false;
 
         if let Some(img) = self
             .prefetcher
@@ -808,6 +955,37 @@ impl App {
         }
 
         self.start_fullscreen_decode(self.current, self.image_rect);
+    }
+
+    /// Build the zoomed, panned crop of the current full-resolution source, sized
+    /// to fill the viewport. Returns `None` when no source is available.
+    fn build_zoom_view(&self) -> Option<RgbaImage> {
+        let src = self.source.as_ref()?;
+        let (ow, oh) = (src.width(), src.height());
+        if ow == 0 || oh == 0 {
+            return None;
+        }
+
+        let vw = (self.image_rect.width as u32 * self.cell_px.0).max(1);
+        let vh = (self.image_rect.height as u32 * self.cell_px.1).max(1);
+
+        // Fit-to-window scale, never upscaling the base image (matches zoom == 1.0).
+        let fit = f64::min(vw as f64 / ow as f64, vh as f64 / oh as f64);
+        let base = fit.min(1.0);
+        let eff = base * self.zoom;
+
+        // Source-pixel crop window that maps onto the viewport at the effective scale.
+        let crop_w = ((vw as f64 / eff).round() as u32).clamp(1, ow);
+        let crop_h = ((vh as f64 / eff).round() as u32).clamp(1, oh);
+        let max_x = ow.saturating_sub(crop_w);
+        let max_y = oh.saturating_sub(crop_h);
+        let x = (self.pan_x * max_x as f64).round() as u32;
+        let y = (self.pan_y * max_y as f64).round() as u32;
+
+        let cropped = src.crop_imm(x, y, crop_w, crop_h);
+        let dst_w = ((crop_w as f64 * eff).round() as u32).max(1).min(vw);
+        let dst_h = ((crop_h as f64 * eff).round() as u32).max(1).min(vh);
+        Some(resize_to_exact(&cropped, dst_w, dst_h))
     }
 }
 
@@ -858,6 +1036,29 @@ pub(crate) fn resize_decoded(img: &DynamicImage, rect: Rect, cell_px: (u32, u32)
     let max_w = rect.width as u32 * cell_px.0;
     let max_h = rect.height as u32 * cell_px.1;
     resize_decoded_to_dims(img, max_w, max_h)
+}
+
+/// Resize `img` to exactly `dst_w` x `dst_h` (used for zoomed crops, which may upscale).
+pub(crate) fn resize_to_exact(img: &DynamicImage, dst_w: u32, dst_h: u32) -> RgbaImage {
+    let (ow, oh) = (img.width(), img.height());
+    if dst_w == 0 || dst_h == 0 || ow == 0 || oh == 0 {
+        return img.to_rgba8();
+    }
+    if dst_w == ow && dst_h == oh {
+        return img.to_rgba8();
+    }
+    let src_rgba = img.to_rgba8();
+    let Ok(src_image) =
+        fir::images::Image::from_vec_u8(ow, oh, src_rgba.into_raw(), fir::PixelType::U8x4)
+    else {
+        return img.to_rgba8();
+    };
+    let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x4);
+    let mut resizer = fir::Resizer::new();
+    if resizer.resize(&src_image, &mut dst_image, None).is_err() {
+        return img.to_rgba8();
+    }
+    RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec()).unwrap_or_else(|| img.to_rgba8())
 }
 
 pub(crate) fn decode_image_with_hint(
@@ -1082,7 +1283,7 @@ fn prune_disk_cache(cache_dir: &Path, max_bytes: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_cache_file_path, resize_decoded_to_dims};
+    use super::{get_cache_file_path, resize_decoded_to_dims, resize_to_exact};
     use image::DynamicImage;
     use std::fs;
 
@@ -1097,6 +1298,35 @@ mod tests {
             resize_decoded_to_dims(&image, 200, 200).dimensions(),
             (100, 50)
         );
+    }
+
+    #[test]
+    fn resize_to_exact_upscales_to_requested_dimensions() {
+        let image = DynamicImage::new_rgba8(10, 10);
+        // Zoomed crops may upscale, unlike the fit-to-window path.
+        assert_eq!(resize_to_exact(&image, 40, 30).dimensions(), (40, 30));
+        assert_eq!(resize_to_exact(&image, 10, 10).dimensions(), (10, 10));
+    }
+
+    #[test]
+    fn zoom_view_crops_and_fills_the_viewport() {
+        use super::App;
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+
+        let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+        app.image_rect = Rect::new(0, 0, 100, 100);
+        // 400x400 source, viewport 100x100 -> fit scale 0.25 (base image is 100x100).
+        app.source = Some(DynamicImage::new_rgba8(400, 400));
+        app.source_for = Some(0);
+        app.current = 0;
+
+        // At 2x zoom the effective scale is 0.5, so the crop is 200x200 source px
+        // upscaled to exactly the 100x100 viewport.
+        app.zoom = 2.0;
+        let view = app.build_zoom_view().expect("zoom view");
+        assert_eq!(view.dimensions(), (100, 100));
     }
 
     #[test]

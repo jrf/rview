@@ -186,7 +186,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App) {
     let hint = if picker.filter_active {
         " Esc: cancel  Enter: confirm  Backspace: delete "
     } else {
-        " Enter: choose  l: descend  h: parent  t: theme  /: filter  ?: help  Esc: gallery  q: quit "
+        " Enter: choose  /: filter  ?: help  q: quit "
     };
 
     let bottom_line = if let Some(ref err) = picker.error {
@@ -279,20 +279,27 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
             .as_ref()
             .map(|img| format!(" {}x{}", img.width(), img.height()))
             .unwrap_or_default();
+        let zoom = if app.zoom > 1.0 {
+            format!(" {:.0}%", app.zoom * 100.0)
+        } else {
+            String::new()
+        };
+        let hint = if app.zoom > 1.0 {
+            " hjkl: pan  +/-: zoom  0: reset  ?: help  q: quit "
+        } else {
+            " \u{2190}/\u{2192}: navigate  +/-: zoom  ?: help  q: quit "
+        };
         Line::from(vec![
             Span::styled(
                 format!(
-                    " {} [{}/{}]{dims} ",
+                    " {} [{}/{}]{dims}{zoom} ",
                     filename,
                     app.current + 1,
                     app.images.len(),
                 ),
                 theme.popup_text,
             ),
-            Span::styled(
-                " Esc: gallery  \u{2190}/\u{2192}: navigate  t: theme  ?: help  q: quit ",
-                theme.popup_desc,
-            ),
+            Span::styled(hint, theme.popup_desc),
         ])
     };
 
@@ -356,7 +363,7 @@ fn draw_video(frame: &mut Frame, app: &mut App) {
                 theme.popup_text,
             ),
             Span::styled(
-                " Space: pause  Esc: gallery  \u{2190}/\u{2192}: navigate  t: theme  q: quit ",
+                " Space: pause  \u{2190}/\u{2192}: navigate  ?: help  q: quit ",
                 theme.popup_desc,
             ),
         ])
@@ -471,7 +478,7 @@ fn draw_gallery(frame: &mut Frame, app: &mut App) {
         let hint = if app.gallery.search_active {
             " Esc: cancel  Enter: confirm "
         } else {
-            " Enter: open  Space: mark  d: trash  D: delete  o: browse  t: theme  /: search  ?: help  q: quit "
+            " Enter: open  /: search  ?: help  q: quit "
         };
         if filtered_count == 0 {
             Line::from(Span::styled(hint, theme.popup_desc))
@@ -606,10 +613,29 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("\u{2190} / \u{2192}", "Previous / next image"),
         ("h / l", "Previous / next image"),
         ("Home / End", "Jump to first / last"),
+        ("+ / -", "Zoom in / out"),
+        ("0", "Reset zoom to fit"),
+        ("h/j/k/l", "Pan when zoomed"),
         ("d / D", "Trash / permanently delete image"),
         ("t", "Open session theme picker"),
         ("Esc", "Back to gallery"),
         ("?", "Toggle help"),
+        ("q", "Quit"),
+        #[cfg(feature = "video")]
+        ("", ""),
+        #[cfg(feature = "video")]
+        ("", "Video"),
+        #[cfg(feature = "video")]
+        ("Space", "Pause / resume"),
+        #[cfg(feature = "video")]
+        ("\u{2190} / \u{2192}", "Previous / next file"),
+        #[cfg(feature = "video")]
+        ("h / l", "Previous / next file"),
+        #[cfg(feature = "video")]
+        ("t", "Open session theme picker"),
+        #[cfg(feature = "video")]
+        ("Esc", "Back to gallery"),
+        #[cfg(feature = "video")]
         ("q", "Quit"),
         ("", ""),
         ("", "Directory picker"),
