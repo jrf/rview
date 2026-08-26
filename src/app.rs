@@ -1065,19 +1065,42 @@ pub(crate) fn decode_image_with_hint(
     path: &Path,
     target: Option<(u32, u32)>,
 ) -> io::Result<DynamicImage> {
+    // libjpeg-turbo is the fast path, but it rejects some JPEG variants the
+    // pure-Rust decoder accepts (and vice versa), so a turbo failure falls
+    // through to `image` rather than aborting. Remember turbo's error so that if
+    // the fallback also fails we can report *both* reasons instead of only the
+    // fallback's — otherwise a genuine turbo diagnosis is lost.
     #[cfg(feature = "turbo")]
-    if is_jpeg(path) {
-        if let Ok(img) = decode_jpeg_turbo(path, target) {
-            return Ok(img);
+    let turbo_error = if is_jpeg(path) {
+        match decode_jpeg_turbo(path, target) {
+            Ok(img) => return Ok(img),
+            Err(error) => Some(error),
         }
-    }
+    } else {
+        None
+    };
 
-    ImageReader::open(path)
+    let fallback = ImageReader::open(path)
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?
         .with_guessed_format()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .decode()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        .decode();
+
+    match fallback {
+        Ok(img) => Ok(img),
+        Err(fallback_error) => {
+            #[cfg(feature = "turbo")]
+            if let Some(turbo_error) = turbo_error {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "failed to decode image (libjpeg-turbo: {turbo_error}; image: {fallback_error})"
+                    ),
+                ));
+            }
+            Err(io::Error::new(io::ErrorKind::InvalidData, fallback_error))
+        }
+    }
 }
 
 #[cfg(feature = "turbo")]
@@ -1283,9 +1306,29 @@ fn prune_disk_cache(cache_dir: &Path, max_bytes: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_cache_file_path, resize_decoded_to_dims, resize_to_exact};
+    use super::{
+        decode_image_with_hint, get_cache_file_path, resize_decoded_to_dims, resize_to_exact,
+    };
     use image::DynamicImage;
     use std::fs;
+
+    #[cfg(feature = "turbo")]
+    #[test]
+    fn corrupt_jpeg_reports_both_decoder_errors() {
+        // A file with the JPEG SOI magic but no valid frame: both libjpeg-turbo
+        // and the pure-Rust fallback reject it. The error must mention both so a
+        // turbo-only diagnosis is not silently lost.
+        let path = std::env::temp_dir().join(format!(
+            "rview-synthetic-corrupt-{}.jpg",
+            std::process::id()
+        ));
+        fs::write(&path, [0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+        let err = decode_image_with_hint(&path, None).unwrap_err();
+        let message = err.to_string();
+        fs::remove_file(&path).unwrap();
+        assert!(message.contains("libjpeg-turbo:"), "message: {message}");
+        assert!(message.contains("image:"), "message: {message}");
+    }
 
     #[test]
     fn resize_preserves_aspect_ratio_without_upscaling() {
