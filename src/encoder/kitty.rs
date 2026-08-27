@@ -38,7 +38,7 @@ pub fn encode_png_to<W: Write + ?Sized>(
             let rows_part = opts.rows.map(|r| format!(",r={r}")).unwrap_or_default();
             write!(
                 out,
-                "\x1b_Ga=T,q=2,f={f_val},s={w},v={h}{id_part}{cols_part}{rows_part},m={more};"
+                "\x1b_Ga=T,q=2,C=1,f={f_val},s={w},v={h}{id_part}{cols_part}{rows_part},m={more};"
             )?;
         } else {
             write!(out, "\x1b_Gm={more};")?;
@@ -66,8 +66,9 @@ pub fn clear_placements_to<W: Write + ?Sized>(out: &mut W) -> io::Result<()> {
 }
 
 /// Place an already-transmitted image (by ID) at the cursor position. Cheap — no PNG payload.
+/// `C=1` keeps the text cursor fixed so large placements never scroll the grid.
 pub fn place_by_id_to<W: Write + ?Sized>(out: &mut W, id: u32) -> io::Result<()> {
-    write!(out, "\x1b_Ga=p,q=2,i={id}\x1b\\")
+    write!(out, "\x1b_Ga=p,q=2,C=1,i={id}\x1b\\")
 }
 
 #[cfg(test)]
@@ -84,7 +85,7 @@ mod tests {
         place_by_id_to(&mut output, 42).unwrap();
         assert_eq!(
             output,
-            b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b_Ga=d,d=a,q=2\x1b\\\x1b_Ga=p,q=2,i=42\x1b\\"
+            b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b_Ga=d,d=a,q=2\x1b\\\x1b_Ga=p,q=2,C=1,i=42\x1b\\"
         );
     }
 
@@ -104,6 +105,7 @@ mod tests {
         .unwrap();
         let encoded = String::from_utf8(output).unwrap();
         assert!(encoded.starts_with("\u{1b}_Ga=T,q=2,"));
+        assert!(encoded.contains(",C=1,"));
         assert!(encoded.contains(",s=2,v=3,i=7,"));
         assert!(encoded.ends_with("\u{1b}\\"));
     }
