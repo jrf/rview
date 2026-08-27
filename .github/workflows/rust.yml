@@ -11,12 +11,42 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: 1.85.0
+        components: rustfmt, clippy
+
+    - name: Install native dependencies
+      # turbojpeg-sys builds libjpeg-turbo from source (needs cmake + nasm);
+      # ffmpeg-next (video feature) needs the FFmpeg dev libraries.
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake nasm \
+          libavutil-dev libavformat-dev libavfilter-dev \
+          libavdevice-dev libavcodec-dev libswscale-dev libswresample-dev \
+          pkg-config clang
+
+    - name: Format
+      run: cargo fmt --all --check
+
+    - name: Clippy (default features)
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Clippy (video feature)
+      run: cargo clippy --all-targets --features video -- -D warnings
+
     - name: Build
       run: cargo build --verbose
-    - name: Run tests
+
+    - name: Test (default features)
       run: cargo test --verbose
+
+    - name: Test (video feature)
+      run: cargo test --verbose --features video
