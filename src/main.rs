@@ -635,12 +635,18 @@ fn handle_picker_key(app: &mut App, code: KeyCode) -> io::Result<bool> {
 fn query_cell_pixel_size() -> (u32, u32) {
     crossterm::terminal::window_size()
         .map(|ws| {
-            let w = if ws.columns > 0 {
+            // A terminal that does not report pixel dimensions (common under
+            // terminal multiplexers such as rift/tmux, and some SSH setups)
+            // returns ws.width/ws.height == 0 even though columns/rows are
+            // valid. Treat a zero pixel report as "unknown" and fall back to
+            // conventional cell metrics, otherwise the division below collapses
+            // to 1x1 and thumbnails render only a few pixels tall.
+            let w = if ws.columns > 0 && ws.width > 0 {
                 ws.width as u32 / ws.columns as u32
             } else {
                 8
             };
-            let h = if ws.rows > 0 {
+            let h = if ws.rows > 0 && ws.height > 0 {
                 ws.height as u32 / ws.rows as u32
             } else {
                 16
