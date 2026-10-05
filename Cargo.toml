@@ -10,6 +10,7 @@ homepage = "https://github.com/jrf/rview"
 
 [dependencies]
 image = "0.25"
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 ratatui = "0.29"

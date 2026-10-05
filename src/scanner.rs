@@ -5,7 +5,7 @@ use std::thread;
 const BATCH_SIZE: usize = 64;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "ico", "avif",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "ico", "avif", "svg",
 ];
 
 #[cfg(feature = "video")]
@@ -118,6 +118,8 @@ mod tests {
     fn supported_extensions_are_case_insensitive() {
         assert!(is_supported(Path::new("synthetic.PNG")));
         assert!(is_supported(Path::new("synthetic.jpeg")));
+        assert!(is_supported(Path::new("synthetic.svg")));
+        assert!(is_supported(Path::new("synthetic.SVG")));
     }
 
     #[test]

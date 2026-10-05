@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Arc, LazyLock, OnceLock, mpsc};
 
 /// Multiplier applied on each zoom step.
 const ZOOM_STEP: f64 = 1.25;
@@ -41,6 +41,31 @@ pub struct ThemePickerState {
     pub original_index: usize,
     pub scroll: usize,
     pub visible_height: usize,
+}
+
+enum ZoomSource {
+    Raster(DynamicImage),
+    Svg(resvg::usvg::Tree),
+}
+
+impl ZoomSource {
+    fn dimensions(&self) -> (f64, f64) {
+        match self {
+            Self::Raster(image) => (f64::from(image.width()), f64::from(image.height())),
+            Self::Svg(tree) => (
+                f64::from(tree.size().width()),
+                f64::from(tree.size().height()),
+            ),
+        }
+    }
+}
+
+struct ZoomCrop {
+    width: f64,
+    height: f64,
+    max_x: f64,
+    max_y: f64,
+    scale: f64,
 }
 
 pub struct App {
@@ -85,10 +110,10 @@ pub struct App {
     pan_x: f64,
     pan_y: f64,
     zoom_dirty: bool,
-    /// Full-resolution decoded source for the current fullscreen image, used for zoomed crops.
-    source: Option<DynamicImage>,
+    /// Original raster pixels or a parsed SVG retained for rendering zoomed views.
+    source: Option<ZoomSource>,
     source_for: Option<usize>,
-    source_rx: Option<mpsc::Receiver<io::Result<DynamicImage>>>,
+    source_rx: Option<mpsc::Receiver<io::Result<ZoomSource>>>,
     source_target: Option<usize>,
 
     #[cfg(feature = "video")]
@@ -519,11 +544,16 @@ impl App {
         self.source_target = Some(idx);
         let path = self.images[idx].clone();
         rayon::spawn(move || {
-            let _ = tx.send(decode_image_with_hint(&path, None));
+            let source = if is_svg(&path) {
+                parse_svg(&path).map(ZoomSource::Svg)
+            } else {
+                decode_image_with_hint(&path, None).map(ZoomSource::Raster)
+            };
+            let _ = tx.send(source);
         });
     }
 
-    /// Receive an async full-resolution source decode for zooming.
+    /// Receive an async raster decode or SVG parse for zooming.
     pub fn poll_source(&mut self) -> bool {
         let result = self.source_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(result) = result {
@@ -905,20 +935,25 @@ impl App {
     }
 
     pub fn load_if_needed(&mut self) {
-        // Zoomed view: crop the full-resolution source around the pan point and
-        // resize that crop to fill the viewport.
+        // Zoom from the original raster pixels or render the retained SVG vectors.
         if self.zoom > 1.0 {
             if self.source_for == Some(self.current) {
                 if self.zoom_dirty
-                    || self.loaded.is_none()
+                    || (self.loaded.is_none() && self.error.is_none())
                     || self.loaded_for_rect != self.image_rect
                 {
-                    if let Some(view) = self.build_zoom_view() {
-                        self.loaded = Some(view);
-                        self.error = None;
-                        self.loaded_for_rect = self.image_rect;
-                        self.zoom_dirty = false;
+                    match self.build_zoom_view() {
+                        Ok(view) => {
+                            self.loaded = Some(view);
+                            self.error = None;
+                        }
+                        Err(error) => {
+                            self.loaded = None;
+                            self.error = Some(error.to_string());
+                        }
                     }
+                    self.loaded_for_rect = self.image_rect;
+                    self.zoom_dirty = false;
                 }
                 return;
             }
@@ -957,35 +992,82 @@ impl App {
         self.start_fullscreen_decode(self.current, self.image_rect);
     }
 
-    /// Build the zoomed, panned crop of the current full-resolution source, sized
-    /// to fill the viewport. Returns `None` when no source is available.
-    fn build_zoom_view(&self) -> Option<RgbaImage> {
-        let src = self.source.as_ref()?;
-        let (ow, oh) = (src.width(), src.height());
-        if ow == 0 || oh == 0 {
-            return None;
+    fn viewport_pixels(&self) -> (u32, u32) {
+        (
+            (self.image_rect.width as u32 * self.cell_px.0).max(1),
+            (self.image_rect.height as u32 * self.cell_px.1).max(1),
+        )
+    }
+
+    /// Source crop geometry used by zoom rendering.
+    fn zoom_crop(&self, src: &ZoomSource, vw: u32, vh: u32) -> ZoomCrop {
+        let (ow, oh) = src.dimensions();
+        let fit = f64::min(f64::from(vw) / ow, f64::from(vh) / oh);
+        let scale = fit.min(1.0) * self.zoom;
+        let (width, height) = match src {
+            ZoomSource::Raster(_) => (
+                (f64::from(vw) / scale).round().clamp(1.0, ow),
+                (f64::from(vh) / scale).round().clamp(1.0, oh),
+            ),
+            // Vector crops have no source-pixel grid or minimum one-pixel extent.
+            ZoomSource::Svg(_) => (
+                (f64::from(vw) / scale).min(ow),
+                (f64::from(vh) / scale).min(oh),
+            ),
+        };
+        ZoomCrop {
+            width,
+            height,
+            max_x: ow - width,
+            max_y: oh - height,
+            scale,
         }
+    }
 
-        let vw = (self.image_rect.width as u32 * self.cell_px.0).max(1);
-        let vh = (self.image_rect.height as u32 * self.cell_px.1).max(1);
+    /// Render a zoomed, panned viewport without rasterizing SVGs at intrinsic size.
+    fn build_zoom_view(&self) -> io::Result<RgbaImage> {
+        let src = self
+            .source
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "zoom source is not loaded"))?;
+        let (ow, oh) = src.dimensions();
+        if ow == 0.0 || oh == 0.0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid image dimensions",
+            ));
+        }
+        let (vw, vh) = self.viewport_pixels();
+        let crop = self.zoom_crop(src, vw, vh);
+        let x = self.pan_x * crop.max_x;
+        let y = self.pan_y * crop.max_y;
+        let dst_w = ((crop.width * crop.scale).round() as u32).max(1).min(vw);
+        let dst_h = ((crop.height * crop.scale).round() as u32).max(1).min(vh);
 
-        // Fit-to-window scale, never upscaling the base image (matches zoom == 1.0).
-        let fit = f64::min(vw as f64 / ow as f64, vh as f64 / oh as f64);
-        let base = fit.min(1.0);
-        let eff = base * self.zoom;
-
-        // Source-pixel crop window that maps onto the viewport at the effective scale.
-        let crop_w = ((vw as f64 / eff).round() as u32).clamp(1, ow);
-        let crop_h = ((vh as f64 / eff).round() as u32).clamp(1, oh);
-        let max_x = ow.saturating_sub(crop_w);
-        let max_y = oh.saturating_sub(crop_h);
-        let x = (self.pan_x * max_x as f64).round() as u32;
-        let y = (self.pan_y * max_y as f64).round() as u32;
-
-        let cropped = src.crop_imm(x, y, crop_w, crop_h);
-        let dst_w = ((crop_w as f64 * eff).round() as u32).max(1).min(vw);
-        let dst_h = ((crop_h as f64 * eff).round() as u32).max(1).min(vh);
-        Some(resize_to_exact(&cropped, dst_w, dst_h))
+        match src {
+            ZoomSource::Raster(image) => {
+                let cropped = image.crop_imm(
+                    x.round() as u32,
+                    y.round() as u32,
+                    crop.width as u32,
+                    crop.height as u32,
+                );
+                Ok(resize_to_exact(&cropped, dst_w, dst_h))
+            }
+            ZoomSource::Svg(tree) => render_svg_viewport(
+                tree,
+                dst_w,
+                dst_h,
+                resvg::tiny_skia::Transform::from_row(
+                    crop.scale as f32,
+                    0.0,
+                    0.0,
+                    crop.scale as f32,
+                    -(x * crop.scale) as f32,
+                    -(y * crop.scale) as f32,
+                ),
+            ),
+        }
     }
 }
 
@@ -1061,10 +1143,19 @@ pub(crate) fn resize_to_exact(img: &DynamicImage, dst_w: u32, dst_h: u32) -> Rgb
     RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec()).unwrap_or_else(|| img.to_rgba8())
 }
 
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+}
+
 pub(crate) fn decode_image_with_hint(
     path: &Path,
     target: Option<(u32, u32)>,
 ) -> io::Result<DynamicImage> {
+    if is_svg(path) {
+        return decode_svg(path, target);
+    }
+
     // libjpeg-turbo is the fast path, but it rejects some JPEG variants the
     // pure-Rust decoder accepts (and vice versa), so a turbo failure falls
     // through to `image` rather than aborting. Remember turbo's error so that if
@@ -1101,6 +1192,120 @@ pub(crate) fn decode_image_with_hint(
             Err(io::Error::new(io::ErrorKind::InvalidData, fallback_error))
         }
     }
+}
+
+fn parse_svg(path: &Path) -> io::Result<resvg::usvg::Tree> {
+    use resvg::usvg;
+
+    static FONTS: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        Arc::new(fonts)
+    });
+    let options = usvg::Options {
+        resources_dir: path.parent().map(Path::to_path_buf),
+        fontdb: Arc::clone(&FONTS),
+        ..usvg::Options::default()
+    };
+    let data = std::fs::read(path)?;
+    usvg::Tree::from_data(&data, &options)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn decode_svg(path: &Path, target: Option<(u32, u32)>) -> io::Result<DynamicImage> {
+    let tree = parse_svg(path)?;
+    let size = tree.size();
+    // Match raster fit-to-window behavior: preserve aspect ratio, never upscale.
+    let scale = match target {
+        Some((w, h)) if w > 0 && h > 0 => (w as f32 / size.width())
+            .min(h as f32 / size.height())
+            .min(1.0),
+        _ => 1.0,
+    };
+    let width = ((size.width() * scale) as u32).max(1);
+    let height = ((size.height() * scale) as u32).max(1);
+    render_svg(
+        &tree,
+        width,
+        height,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        None,
+    )
+    .map(DynamicImage::ImageRgba8)
+}
+
+/// Keep filter inputs outside the visible crop available to resvg's layer renderer.
+fn render_svg_viewport(
+    tree: &resvg::usvg::Tree,
+    width: u32,
+    height: u32,
+    mut transform: resvg::tiny_skia::Transform,
+) -> io::Result<RgbaImage> {
+    if tree.filters().is_empty() {
+        return render_svg(tree, width, height, transform, None);
+    }
+
+    // resvg bounds intermediate filter layers relative to the destination canvas.
+    // Render the scaled document before cropping so off-screen inputs can contribute
+    // to visible effects. Integer padding preserves the viewport's subpixel phase.
+    let left = (-transform.tx).ceil().max(0.0) as u32;
+    let top = (-transform.ty).ceil().max(0.0) as u32;
+    let crop = resvg::tiny_skia::IntRect::from_xywh(left as i32, top as i32, width, height)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SVG crop dimensions"))?;
+    transform.tx += left as f32;
+    transform.ty += top as f32;
+    let full_width = ((tree.size().width() * transform.sx + transform.tx).ceil() as u32)
+        .max(crop.right() as u32);
+    let full_height = ((tree.size().height() * transform.sy + transform.ty).ceil() as u32)
+        .max(crop.bottom() as u32);
+    render_svg(tree, full_width, full_height, transform, Some(crop))
+}
+
+fn render_svg(
+    tree: &resvg::usvg::Tree,
+    width: u32,
+    height: u32,
+    transform: resvg::tiny_skia::Transform,
+    crop: Option<resvg::tiny_skia::IntRect>,
+) -> io::Result<RgbaImage> {
+    use resvg::tiny_skia;
+
+    // Apply the raster decoder's allocation budget before tiny-skia allocates.
+    let mut limits = image::Limits::default();
+    limits
+        .reserve_buffer(width, height, image::ColorType::Rgba8)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if let Some(crop) = crop {
+        limits
+            .reserve_buffer(crop.width(), crop.height(), image::ColorType::Rgba8)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    }
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "invalid SVG image dimensions")
+    })?;
+    resvg::render(tree, transform, &mut pixmap.as_mut());
+    let pixmap = if let Some(crop) = crop {
+        let viewport = pixmap.clone_rect(crop).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid SVG crop dimensions")
+        })?;
+        drop(pixmap);
+        viewport
+    } else {
+        pixmap
+    };
+    let (width, height) = (pixmap.width(), pixmap.height());
+    let mut pixels = pixmap.take();
+    // tiny-skia produces premultiplied RGBA; image and Kitty need straight alpha.
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha > 0 && alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha) as u8;
+            }
+        }
+    }
+    RgbaImage::from_raw(width, height, pixels)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SVG image dimensions"))
 }
 
 #[cfg(feature = "turbo")]
@@ -1180,6 +1385,11 @@ fn decode_jpeg_turbo(path: &Path, target: Option<(u32, u32)>) -> io::Result<Dyna
 }
 
 fn get_cache_file_path(path: &Path, target_w: u32, target_h: u32) -> Option<PathBuf> {
+    // SVGs may reference other files or system fonts not covered by this key.
+    if is_svg(path) {
+        return None;
+    }
+
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
     use std::hash::{Hash, Hasher};
@@ -1309,8 +1519,359 @@ mod tests {
     use super::{
         decode_image_with_hint, get_cache_file_path, resize_decoded_to_dims, resize_to_exact,
     };
-    use image::DynamicImage;
+    use image::{DynamicImage, GenericImageView};
     use std::fs;
+
+    #[test]
+    fn svg_renders_viewbox_at_target_size_with_straight_alpha() {
+        let path =
+            std::env::temp_dir().join(format!("rview-synthetic-alpha-{}.SVG", std::process::id()));
+        fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50">
+                <rect width="50" height="50" fill="#ff0000" fill-opacity="0.5"/>
+            </svg>"##,
+        )
+        .unwrap();
+
+        let thumbnail = decode_image_with_hint(&path, Some((20, 20)))
+            .unwrap()
+            .into_rgba8();
+        let source = decode_image_with_hint(&path, None).unwrap();
+        let larger = decode_image_with_hint(&path, Some((200, 200))).unwrap();
+        let zero_target = decode_image_with_hint(&path, Some((0, 20))).unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(thumbnail.dimensions(), (20, 10));
+        assert_eq!(thumbnail.get_pixel(5, 5).0, [255, 0, 0, 128]);
+        assert_eq!(thumbnail.get_pixel(15, 5).0, [0, 0, 0, 0]);
+        assert_eq!(source.dimensions(), (100, 50));
+        assert_eq!(larger.dimensions(), (100, 50));
+        assert_eq!(zero_target.dimensions(), (100, 50));
+    }
+
+    #[test]
+    fn svg_resolves_images_relative_to_its_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "rview-synthetic-svg-resources-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 255, 0, 255]))
+            .save(root.join("tile.png"))
+            .unwrap();
+        let path = root.join("image.svg");
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"
+                xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+                <image width="10" height="10" xlink:href="tile.png"/>
+            </svg>"#,
+        )
+        .unwrap();
+        let image = decode_image_with_hint(&path, None).unwrap().into_rgba8();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(image.get_pixel(5, 5).0, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn svg_thumbnail_refreshes_when_a_referenced_image_changes() {
+        use super::App;
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+
+        let root = std::env::temp_dir().join(format!(
+            "rview-synthetic-svg-thumbnail-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let resource = root.join("tile.png");
+        let source = root.join("image.SVG");
+        fs::write(
+            &source,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"
+                xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+                <image width="10" height="10" xlink:href="tile.png"/>
+            </svg>"#,
+        )
+        .unwrap();
+        let mut pixels = Vec::new();
+        for color in [[0, 255, 0, 255], [0, 0, 255, 255]] {
+            image::RgbaImage::from_pixel(10, 10, image::Rgba(color))
+                .save(&resource)
+                .unwrap();
+            // A new viewer must not reuse a thumbnail of the old reference.
+            let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+            app.spawn_thumb_decode(0, source.clone(), Rect::new(0, 0, 10, 10));
+            let (_, _, image) = app
+                .thumb_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            pixels.push(image.get_pixel(5, 5).0);
+        }
+        if let Some(cache) = get_cache_file_path(&source, 10, 10) {
+            let _ = fs::remove_file(cache);
+        }
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(pixels, [[0, 255, 0, 255], [0, 0, 255, 255]]);
+    }
+
+    #[test]
+    fn oversized_svg_rejects_intrinsic_decode_but_allows_bounded_rendering() {
+        let path = std::env::temp_dir().join(format!(
+            "rview-synthetic-oversized-{}.svg",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"
+                width="100000000" height="100000000">
+                <rect width="100000000" height="100000000" fill="red"/>
+            </svg>"#,
+        )
+        .unwrap();
+        let intrinsic = decode_image_with_hint(&path, None).unwrap_err();
+        let oversized_target =
+            decode_image_with_hint(&path, Some((100000000, 100000000))).unwrap_err();
+        let bounded = decode_image_with_hint(&path, Some((20, 20)))
+            .unwrap()
+            .into_rgba8();
+        fs::remove_file(path).unwrap();
+        assert_eq!(intrinsic.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(oversized_target.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(bounded.dimensions(), (20, 20));
+        assert_eq!(bounded.get_pixel(10, 10).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn svg_zoom_preserves_filter_inputs_outside_the_viewport() {
+        use super::{App, ZoomSource};
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+
+        let tree = resvg::usvg::Tree::from_str(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <defs><filter id="f" filterUnits="userSpaceOnUse"
+                    primitiveUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+                    <feOffset in="SourceGraphic" dx="50" dy="0"/>
+                </filter></defs>
+                <rect x="0" y="45" width="10" height="10" fill="red" filter="url(#f)"/>
+            </svg>"#,
+            &resvg::usvg::Options::default(),
+        )
+        .unwrap();
+        let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+        app.reset_zoom_state();
+        app.image_rect = Rect::new(0, 0, 100, 100);
+        app.source = Some(ZoomSource::Svg(tree));
+        app.zoom = 16.0;
+        let view = app.build_zoom_view().unwrap();
+        assert_eq!(view.get_pixel(75, 50).0, [255, 0, 0, 255]);
+        assert_eq!(view.get_pixel(25, 50).0, [0, 0, 0, 0]);
+        app.pan_x = (46.875 - 0.5 / 16.0) / 93.75;
+        let shifted = app.build_zoom_view().unwrap();
+        assert!(shifted.get_pixel(50, 50).0[3] > 0);
+        assert!(shifted.get_pixel(50, 50).0[3] < 255);
+        assert_eq!(shifted.get_pixel(51, 50).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn svg_zoom_preserves_detail_smaller_than_an_intrinsic_pixel() {
+        use super::App;
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+        use std::fmt::Write;
+        use std::time::{Duration, Instant};
+
+        let path = std::env::temp_dir().join(format!(
+            "rview-synthetic-svg-zoom-detail-{}.svg",
+            std::process::id()
+        ));
+        let mut svg = String::from(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+                <rect width="64" height="64" fill="white"/>"#,
+        );
+        for stripe in 0..256 {
+            write!(
+                svg,
+                r#"<rect x="{}" width="0.125" height="64" fill="black"/>"#,
+                f64::from(stripe) * 0.25
+            )
+            .unwrap();
+        }
+        svg.push_str("</svg>");
+        fs::write(&path, svg).unwrap();
+        let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+        app.reset_zoom_state();
+        app.images.push(path.clone());
+        app.image_rect = Rect::new(0, 0, 64, 64);
+        app.zoom = 8.0;
+        app.start_source_decode(0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !app.poll_source() {
+            assert!(Instant::now() < deadline, "SVG source decode timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.load_if_needed();
+        let view = app.loaded.as_ref().unwrap();
+        fs::remove_file(path).unwrap();
+
+        for x in 0..64 {
+            let value = if x % 2 == 0 { 0 } else { 255 };
+            assert_eq!(view.get_pixel(x, 32).0, [value, value, value, 255]);
+        }
+    }
+
+    #[test]
+    fn svg_zoom_pans_fractional_source_extents_with_straight_alpha() {
+        use super::{App, ZoomSource, parse_svg};
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+
+        let path = std::env::temp_dir().join(format!(
+            "rview-synthetic-svg-fractional-pan-{}.svg",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1">
+                <g opacity="0.5">
+                    <rect width="1" height="1" fill="red"/>
+                    <rect x="1" width="1" height="1" fill="blue"/>
+                </g>
+            </svg>"#,
+        )
+        .unwrap();
+        let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+        app.reset_zoom_state();
+        app.source = Some(ZoomSource::Svg(parse_svg(&path).unwrap()));
+        fs::remove_file(path).unwrap();
+        app.image_rect = Rect::new(0, 0, 8, 8);
+        app.zoom = 16.0;
+        let view = app.build_zoom_view().unwrap();
+        assert_eq!(view.get_pixel(3, 4).0, [255, 0, 0, 128]);
+        assert_eq!(view.get_pixel(4, 4).0, [0, 0, 255, 128]);
+        app.pan_x = 5.0 / 12.0;
+        let dragged = app.build_zoom_view().unwrap();
+        assert_eq!(dragged.get_pixel(5, 4).0, [255, 0, 0, 128]);
+        assert_eq!(dragged.get_pixel(6, 4).0, [0, 0, 255, 128]);
+        app.pan(200.0, 0.0);
+        assert_eq!(
+            app.build_zoom_view().unwrap().get_pixel(0, 4).0,
+            [0, 0, 255, 128]
+        );
+        app.pan(-200.0, 0.0);
+        assert_eq!(
+            app.build_zoom_view().unwrap().get_pixel(7, 4).0,
+            [255, 0, 0, 128]
+        );
+    }
+
+    #[test]
+    fn svg_filter_zoom_reports_canvas_limit_and_recovers() {
+        use super::{App, ZoomSource};
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+
+        let tree = resvg::usvg::Tree::from_str(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"
+                width="100000000" height="100000000">
+                <defs><filter id="f" filterUnits="userSpaceOnUse"
+                    x="0" y="0" width="100000000" height="100000000">
+                    <feFlood flood-color="red"/>
+                </filter></defs>
+                <rect width="100000000" height="100000000" filter="url(#f)"/>
+            </svg>"#,
+            &resvg::usvg::Options::default(),
+        )
+        .unwrap();
+        let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+        app.reset_zoom_state();
+        app.image_rect = Rect::new(0, 0, 1000, 1000);
+        app.source = Some(ZoomSource::Svg(tree));
+        app.source_for = Some(0);
+        app.zoom = 16.0;
+        app.zoom_dirty = true;
+        app.load_if_needed();
+        assert!(app.loaded.is_none());
+        assert!(app.error.is_some());
+
+        app.zoom = 1.25;
+        app.zoom_dirty = true;
+        app.load_if_needed();
+        let view = app.loaded.as_ref().unwrap();
+        assert_eq!(view.dimensions(), (1000, 1000));
+        assert_eq!(view.get_pixel(500, 500).0, [255, 0, 0, 255]);
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn svg_zoom_allocates_only_the_visible_viewport() {
+        use super::{App, ZoomSource, parse_svg};
+        use crate::image_list::SharedImageList;
+        use crate::theme::Theme;
+        use ratatui::layout::Rect;
+
+        let path = std::env::temp_dir().join(format!(
+            "rview-synthetic-svg-bounded-zoom-{}.svg",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"
+                width="100000000" height="100000000">
+                <rect width="100000000" height="100000000" fill="red"/>
+            </svg>"#,
+        )
+        .unwrap();
+        let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
+        app.reset_zoom_state();
+        app.source = Some(ZoomSource::Svg(parse_svg(&path).unwrap()));
+        app.source_for = Some(0);
+        fs::remove_file(path).unwrap();
+        app.image_rect = Rect::new(0, 0, 20, 20);
+        app.zoom = 8.0;
+        app.load_if_needed();
+        let view = app.loaded.as_ref().unwrap();
+        assert_eq!(view.dimensions(), (20, 20));
+        assert_eq!(view.get_pixel(10, 10).0, [255, 0, 0, 255]);
+
+        // A large output, unlike a large intrinsic size, must still respect the budget.
+        app.cell_px = (1000000, 1000000);
+        assert_eq!(
+            app.build_zoom_view().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        app.zoom_dirty = true;
+        app.load_if_needed();
+        assert!(app.loaded.is_none());
+        assert!(app.error.is_some());
+        app.cell_px = (1, 1);
+        app.zoom_dirty = true;
+        app.load_if_needed();
+        assert_eq!(
+            app.loaded.as_ref().unwrap().get_pixel(10, 10).0,
+            [255, 0, 0, 255]
+        );
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn malformed_svg_returns_invalid_data() {
+        let path = std::env::temp_dir().join(format!(
+            "rview-synthetic-malformed-{}.svg",
+            std::process::id()
+        ));
+        fs::write(&path, "<svg").unwrap();
+        let error = decode_image_with_hint(&path, None).unwrap_err();
+        fs::remove_file(path).unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[cfg(feature = "turbo")]
     #[test]
@@ -1361,7 +1922,7 @@ mod tests {
         let mut app = App::new(Theme::fallback(), (1, 1), SharedImageList::new());
         app.image_rect = Rect::new(0, 0, 100, 100);
         // 400x400 source, viewport 100x100 -> fit scale 0.25 (base image is 100x100).
-        app.source = Some(DynamicImage::new_rgba8(400, 400));
+        app.source = Some(super::ZoomSource::Raster(DynamicImage::new_rgba8(400, 400)));
         app.source_for = Some(0);
         app.current = 0;
 
