@@ -285,9 +285,9 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
             String::new()
         };
         let hint = if app.zoom > 1.0 {
-            " hjkl: pan  +/-: zoom  0: reset  ?: help  q: quit "
+            " drag/hjkl: pan  wheel/+/-: zoom  0: reset  ?: help  q: quit "
         } else {
-            " \u{2190}/\u{2192}: navigate  +/-: zoom  ?: help  q: quit "
+            " \u{2190}/\u{2192}: navigate  wheel/+/-: zoom  ?: help  q: quit "
         };
         Line::from(vec![
             Span::styled(
@@ -610,12 +610,12 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
         ("Backspace", "Delete character"),
         ("", ""),
         ("", "Fullscreen"),
+        ("+/- Wheel", "Zoom in / out"),
+        ("hjkl / Drag", "Pan when zoomed (left drag)"),
         ("\u{2190} / \u{2192}", "Previous / next image"),
         ("h / l", "Previous / next image"),
         ("Home / End", "Jump to first / last"),
-        ("+ / -", "Zoom in / out"),
         ("0", "Reset zoom to fit"),
-        ("h/j/k/l", "Pan when zoomed"),
         ("d / D", "Trash / permanently delete image"),
         ("t", "Open session theme picker"),
         ("Esc", "Back to gallery"),

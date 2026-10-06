@@ -15,16 +15,19 @@ use app::{App, ViewMode};
 use clap::Parser;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute, queue,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use encoder::GraphicsBackend;
 use image_list::SharedImageList;
 use ratatui::prelude::*;
-use std::io::{self, Write, stdout};
+use std::io::{self, BufWriter, Write, stdout};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "rview", about = "A fast terminal image viewer")]
@@ -50,9 +53,19 @@ impl TerminalSession {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut output = stdout();
-        if let Err(error) = execute!(output, EnterAlternateScreen, cursor::Hide) {
+        if let Err(error) = execute!(
+            output,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            cursor::Hide
+        ) {
             let _ = disable_raw_mode();
-            let _ = execute!(output, cursor::Show, LeaveAlternateScreen);
+            let _ = execute!(
+                output,
+                DisableMouseCapture,
+                cursor::Show,
+                LeaveAlternateScreen
+            );
             return Err(error);
         }
 
@@ -63,7 +76,12 @@ impl TerminalSession {
             }),
             Err(error) => {
                 let _ = disable_raw_mode();
-                let _ = execute!(stdout(), cursor::Show, LeaveAlternateScreen);
+                let _ = execute!(
+                    stdout(),
+                    DisableMouseCapture,
+                    cursor::Show,
+                    LeaveAlternateScreen
+                );
                 Err(error)
             }
         }
@@ -80,6 +98,21 @@ impl TerminalSession {
         self.restored = true;
 
         let mut first_error = encoder::KittyBackend.delete_all().err();
+        {
+            let mut out = io::stdout().lock();
+            for id in encoder::FULLSCREEN_IMAGE_IDS {
+                if let Err(error) = encoder::KittyBackend.delete_image_to(&mut out, id)
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            if let Err(error) = out.flush()
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
         if let Err(error) = disable_raw_mode()
             && first_error.is_none()
         {
@@ -87,6 +120,7 @@ impl TerminalSession {
         }
         if let Err(error) = execute!(
             self.terminal.backend_mut(),
+            DisableMouseCapture,
             cursor::Show,
             LeaveAlternateScreen
         ) && first_error.is_none()
@@ -178,14 +212,59 @@ fn initial_dir_from_paths(paths: &[PathBuf]) -> PathBuf {
     PathBuf::from(".")
 }
 
+#[derive(Clone, Copy)]
+struct FullscreenImage {
+    id: u32,
+    revision: u64,
+}
+
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     let mut pending_emits: Vec<usize> = Vec::new();
+    let mut mouse_drag = None;
+    let mut fullscreen_view = None;
+    let mut displayed_fullscreen = None;
+    let mut fullscreen_image = None;
 
     loop {
-        // 1. Drain all buffered input first so navigation is never blocked
-        while event::poll(Duration::ZERO)? {
-            if handle_event(app, event::read()?)? {
+        // Bound each drain so a continuous mouse stream cannot starve workers.
+        let input_deadline = Instant::now() + Duration::from_millis(4);
+        for _ in 0..64 {
+            if Instant::now() >= input_deadline || !event::poll(Duration::ZERO)? {
+                break;
+            }
+            let input = event::read()?;
+            let previous_view = (
+                app.mode,
+                app.current,
+                app.help_visible,
+                app.theme_picker.is_some(),
+            );
+            let explicit_clear = matches!(
+                &input,
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press
+                        && ((app.mode == ViewMode::Fullscreen
+                            && matches!(key.code, KeyCode::Home | KeyCode::End))
+                            || (app.pending_delete.is_some()
+                                && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))))
+            );
+            if handle_event(app, input, &mut mouse_drag)? {
                 return Ok(());
+            }
+            if previous_view
+                != (
+                    app.mode,
+                    app.current,
+                    app.help_visible,
+                    app.theme_picker.is_some(),
+                )
+                || explicit_clear
+            {
+                displayed_fullscreen = None;
+                if explicit_clear && app.mode == ViewMode::Fullscreen {
+                    // Home/End can delete graphics without changing the index.
+                    app.needs_render = true;
+                }
             }
         }
 
@@ -194,8 +273,32 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         app.poll_filter();
         app.poll_fullscreen();
         app.poll_source();
+        app.poll_zoom();
         app.prefetcher.poll();
         pending_emits.extend(app.poll_thumbnails());
+
+        // Existing clear paths invalidate uploaded IDs, even if the frame identity
+        // is unchanged (Home/End at the boundary, help, or theme overlays).
+        if fullscreen_image
+            .is_some_and(|image: FullscreenImage| !app.transmitted_image_ids.contains(&image.id))
+        {
+            fullscreen_image = None;
+            displayed_fullscreen = None;
+            if app.mode == ViewMode::Fullscreen {
+                app.needs_render = true;
+            }
+        }
+        if (app.mode != ViewMode::Fullscreen || app.theme_picker.is_some() || app.help_visible)
+            && fullscreen_image.is_some()
+        {
+            let mut out = io::stdout().lock();
+            for id in encoder::FULLSCREEN_IMAGE_IDS {
+                app.graphics.delete_image_to(&mut out, id)?;
+                app.transmitted_image_ids.remove(&id);
+            }
+            out.flush()?;
+            fullscreen_image = None;
+        }
 
         #[cfg(feature = "video")]
         if let Some(ref mut v) = app.video {
@@ -214,10 +317,31 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
         // 3. Draw UI chrome (always fast — ratatui only)
         terminal.draw(|frame| ui::draw(frame, app))?;
+        if app.mode == ViewMode::Fullscreen {
+            let view = (app.current, app.image_rect, app.cell_px);
+            if fullscreen_view != Some(view) {
+                fullscreen_view = Some(view);
+                displayed_fullscreen = None;
+            }
+        } else {
+            fullscreen_view = None;
+            displayed_fullscreen = None;
+        }
+
+        if app.mode == ViewMode::Fullscreen
+            && app.needs_render
+            && !app.images.is_empty()
+            && app.theme_picker.is_none()
+            && !app.help_visible
+        {
+            // Compute and publish the newest available view without a frame delay.
+            app.load_if_needed();
+        }
 
         // 4. Render Kitty images
-        if app.theme_picker.is_some() || app.mode == ViewMode::Picker {
+        if app.theme_picker.is_some() || app.help_visible || app.mode == ViewMode::Picker {
             app.needs_render = false;
+            displayed_fullscreen = None;
             pending_emits.clear();
         } else if app.needs_render && !app.images.is_empty() {
             #[cfg(feature = "video")]
@@ -227,8 +351,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
             match app.mode {
                 ViewMode::Fullscreen => {
-                    app.load_if_needed();
-                    render_fullscreen_image(app)?;
+                    // A pending request keeps the previous terminal image intact.
+                    // Dirty input alone is not a newly published image.
+                    let frame = (
+                        app.loaded_revision,
+                        app.current,
+                        app.image_rect,
+                        app.cell_px,
+                    );
+                    if displayed_fullscreen != Some(frame)
+                        && (app.loaded.is_some() || !app.zoom_render_pending())
+                    {
+                        render_fullscreen_image(app, &mut fullscreen_image)?;
+                        displayed_fullscreen = Some(frame);
+                    }
                     app.prefetcher.set_target_hint(app.image_rect, app.cell_px);
                     app.prefetcher.kick(app.current, &app.images);
                 }
@@ -253,8 +389,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             emit_new_thumbnails(app, &batch)?;
         }
 
-        // 5. Wait for next event (shorter timeout when thumbnails are pending)
-        let timeout = {
+        // Wake promptly for worker results and for the final coalesced motion,
+        // even when the input stream has stopped.
+        let mut timeout = {
             #[cfg(feature = "video")]
             if let Some(ref v) = app.video {
                 v.time_until_next_frame()
@@ -270,13 +407,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 Duration::from_millis(50)
             }
         };
+        if app.zoom_render_pending() {
+            timeout = timeout.min(Duration::from_millis(4));
+        }
         event::poll(timeout)?;
     }
 }
 
-fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
+fn handle_event(
+    app: &mut App,
+    event: Event,
+    mouse_drag: &mut Option<(u16, u16)>,
+) -> io::Result<bool> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
+            *mouse_drag = None;
             if app.help_visible {
                 app.help_visible = false;
                 app.needs_render = true;
@@ -480,10 +625,54 @@ fn handle_event(app: &mut App, event: Event) -> io::Result<bool> {
                 }
             }
         }
-        Event::Resize(_, _) => app.mark_dirty(),
+        Event::Mouse(mouse) => handle_mouse(app, mouse, mouse_drag),
+        Event::Resize(_, _) => {
+            *mouse_drag = None;
+            app.mark_dirty();
+        }
+        Event::FocusLost => *mouse_drag = None,
         _ => {}
     }
     Ok(false)
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, drag: &mut Option<(u16, u16)>) {
+    if app.mode != ViewMode::Fullscreen
+        || app.help_visible
+        || app.pending_delete.is_some()
+        || app.theme_picker.is_some()
+    {
+        *drag = None;
+        return;
+    }
+
+    let inside = app
+        .image_rect
+        .contains(Position::new(mouse.column, mouse.row));
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            *drag = None;
+            if inside {
+                if mouse.kind == MouseEventKind::ScrollUp {
+                    app.zoom_in();
+                } else {
+                    app.zoom_out();
+                }
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if inside && app.zoom > 1.0 => {
+            *drag = Some((mouse.column, mouse.row));
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some((column, row)) = *drag {
+                let dx = f64::from(i32::from(mouse.column) - i32::from(column));
+                let dy = f64::from(i32::from(mouse.row) - i32::from(row));
+                app.pan_pixels(dx * f64::from(app.cell_px.0), dy * f64::from(app.cell_px.1));
+                *drag = Some((mouse.column, mouse.row));
+            }
+        }
+        _ => *drag = None,
+    }
 }
 
 fn handle_theme_picker_key(app: &mut App, code: KeyCode) {
@@ -656,39 +845,86 @@ fn query_cell_pixel_size() -> (u32, u32) {
         .unwrap_or((8, 16))
 }
 
-fn render_fullscreen_image(app: &mut App) -> io::Result<()> {
+fn render_fullscreen_image(
+    app: &mut App,
+    fullscreen_image: &mut Option<FullscreenImage>,
+) -> io::Result<()> {
+    let mut out = BufWriter::with_capacity(64 * 1024, io::stdout().lock());
+    render_fullscreen_image_to(app, fullscreen_image, &mut out)
+}
+
+fn render_fullscreen_image_to<W: Write>(
+    app: &mut App,
+    fullscreen_image: &mut Option<FullscreenImage>,
+    out: &mut W,
+) -> io::Result<()> {
     use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 
-    let mut out = io::stdout().lock();
-    // Wrap the delete + retransmit in a synchronized update so the terminal swaps
-    // atomically instead of briefly showing a blank viewport (visible as flicker
-    // when zooming or panning, which redraw rapidly).
-    queue!(out, BeginSynchronizedUpdate)?;
-    app.graphics_delete_all_to(&mut out)?;
+    let Some(img) = &app.loaded else {
+        queue!(out, BeginSynchronizedUpdate)?;
+        app.graphics_delete_all_to(out)?;
+        for id in encoder::FULLSCREEN_IMAGE_IDS {
+            app.graphics.delete_image_to(out, id)?;
+        }
+        queue!(out, EndSynchronizedUpdate)?;
+        out.flush()?;
+        *fullscreen_image = None;
+        return Ok(());
+    };
 
-    if let Some(ref img) = app.loaded {
-        let (cpw, cph) = app.cell_px;
-        let img_cols = img.width().div_ceil(cpw);
-        let img_rows = img.height().div_ceil(cph);
-        let offset_x =
-            app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
-        let offset_y =
-            app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
+    let previous =
+        (*fullscreen_image).filter(|image| app.transmitted_image_ids.contains(&image.id));
+    let reuse = previous.is_some_and(|image| image.revision == app.loaded_revision);
+    let id = if reuse {
+        previous.unwrap().id
+    } else if previous.is_some_and(|image| image.id == encoder::FULLSCREEN_IMAGE_IDS[0]) {
+        encoder::FULLSCREEN_IMAGE_IDS[1]
+    } else {
+        encoder::FULLSCREEN_IMAGE_IDS[0]
+    };
 
-        queue!(out, cursor::MoveTo(offset_x, offset_y))?;
-        app.graphics.transmit(
-            &mut out,
-            img,
-            &encoder::DisplayOptions {
-                id: None,
-                cols: None,
-                rows: None,
-            },
-        )?;
+    if !reuse {
+        // a=t creates no placement. Never retransmit the visible ID: Kitty
+        // deletes its old placements when that ID receives replacement data.
+        // Finish all chunks before sending any other graphics command.
+        app.graphics.upload_to(out, img, id)?;
+        out.flush()?;
     }
 
+    let (cpw, cph) = app.cell_px;
+    let img_cols = img.width().div_ceil(cpw);
+    let img_rows = img.height().div_ceil(cph);
+    let offset_x = app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
+    let offset_y = app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
+
+    // Only short placement/retirement commands are synchronized; a slow bulk
+    // upload cannot outlive the terminal's synchronization timeout and blank it.
+    queue!(
+        out,
+        BeginSynchronizedUpdate,
+        cursor::MoveTo(offset_x, offset_y)
+    )?;
+    if previous.is_none() {
+        // Scanner-driven gallery -> fullscreen transitions need not pass through
+        // an input clear. Remove those placements only after the upload finishes.
+        app.graphics.clear_placements_to(out)?;
+    }
+    app.graphics.place_with_id_to(out, id, 1)?;
+    if let Some(previous) = previous.filter(|image| image.id != id) {
+        app.graphics.delete_image_to(out, previous.id)?;
+    }
     queue!(out, EndSynchronizedUpdate)?;
-    out.flush()
+    out.flush()?;
+
+    if let Some(previous) = previous.filter(|image| image.id != id) {
+        app.transmitted_image_ids.remove(&previous.id);
+    }
+    app.transmitted_image_ids.insert(id);
+    *fullscreen_image = Some(FullscreenImage {
+        id,
+        revision: app.loaded_revision,
+    });
+    Ok(())
 }
 
 #[cfg(feature = "video")]
@@ -817,13 +1053,128 @@ fn render_gallery_images(app: &mut App) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, KeyCode, SharedImageList, ViewMode, handle_picker_key, handle_theme_picker_key,
+        App, FullscreenImage, KeyCode, SharedImageList, ViewMode, handle_picker_key,
+        handle_theme_picker_key, render_fullscreen_image_to,
     };
+    use crate::encoder::FULLSCREEN_IMAGE_IDS;
     use crate::theme::{NamedTheme, Theme};
+    use image::RgbaImage;
+    use ratatui::layout::Rect;
     use ratatui::style::{Color, Style};
     use std::fs;
+    use std::io::{self, Write};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        bytes: Vec<u8>,
+        flushes: Vec<usize>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes.push(self.bytes.len());
+            Ok(())
+        }
+    }
+
+    fn fullscreen_app() -> App {
+        let mut app = App::new(Theme::default(), (8, 16), SharedImageList::new());
+        app.mode = ViewMode::Fullscreen;
+        app.image_rect = Rect::new(0, 0, 20, 10);
+        app.loaded = Some(RgbaImage::new(16, 16));
+        app.loaded_revision = 1;
+        app
+    }
+
+    #[test]
+    fn fullscreen_upload_finishes_before_synchronized_place_and_retire() {
+        let mut app = fullscreen_app();
+        let old_id = FULLSCREEN_IMAGE_IDS[0];
+        let new_id = FULLSCREEN_IMAGE_IDS[1];
+        app.transmitted_image_ids.insert(old_id);
+        let mut image = Some(FullscreenImage {
+            id: old_id,
+            revision: 0,
+        });
+        let mut out = RecordingWriter::default();
+        render_fullscreen_image_to(&mut app, &mut image, &mut out).unwrap();
+
+        assert_eq!(out.flushes.len(), 2);
+        let upload = std::str::from_utf8(&out.bytes[..out.flushes[0]]).unwrap();
+        assert!(upload.starts_with("\x1b_Ga=t,"));
+        assert!(upload.contains(&format!(",i={new_id},")));
+        assert!(upload.contains("m=0;"));
+        assert!(upload.ends_with("\x1b\\"));
+        assert!(!upload.contains("\x1b_Ga=d"));
+        assert!(!upload.contains("\x1b[?2026h"));
+        let swap = std::str::from_utf8(&out.bytes[out.flushes[0]..]).unwrap();
+        assert!(swap.starts_with("\x1b[?2026h"));
+        let placement = swap.find(&format!("a=p,q=2,C=1,i={new_id},p=1")).unwrap();
+        let retirement = swap.find(&format!("a=d,d=I,q=2,i={old_id}")).unwrap();
+        assert!(placement < retirement);
+        assert!(swap.ends_with("\x1b[?2026l"));
+        assert!(!swap.contains("d=A"));
+        assert_eq!(image.unwrap().id, new_id);
+        assert!(!app.transmitted_image_ids.contains(&old_id));
+        assert!(app.transmitted_image_ids.contains(&new_id));
+
+        app.loaded_revision += 1;
+        let mut next = Vec::new();
+        render_fullscreen_image_to(&mut app, &mut image, &mut next).unwrap();
+        assert_eq!(image.unwrap().id, old_id);
+        assert_eq!(app.transmitted_image_ids.len(), 1);
+    }
+
+    #[test]
+    fn fullscreen_reuses_unchanged_upload_but_reuploads_after_external_clear() {
+        let mut app = fullscreen_app();
+        let mut image = None;
+        render_fullscreen_image_to(&mut app, &mut image, &mut Vec::new()).unwrap();
+        let id = image.unwrap().id;
+
+        // Geometry/chrome redraws reposition the same stable placement, not pixels.
+        app.image_rect.x = 1;
+        let mut redraw = Vec::new();
+        render_fullscreen_image_to(&mut app, &mut image, &mut redraw).unwrap();
+        let redraw = String::from_utf8(redraw).unwrap();
+        assert!(!redraw.contains("a=t"));
+        assert!(!redraw.contains("a=d"));
+        assert!(redraw.contains(&format!("a=p,q=2,C=1,i={id},p=1")));
+
+        app.transmitted_image_ids.clear();
+        let mut cleared = Vec::new();
+        render_fullscreen_image_to(&mut app, &mut image, &mut cleared).unwrap();
+        assert!(
+            String::from_utf8(cleared)
+                .unwrap()
+                .starts_with("\x1b_Ga=t,")
+        );
+        assert_eq!(app.transmitted_image_ids.len(), 1);
+    }
+
+    #[test]
+    fn fullscreen_missing_image_clears_placements_and_both_reserved_slots() {
+        let mut app = fullscreen_app();
+        let mut image = None;
+        render_fullscreen_image_to(&mut app, &mut image, &mut Vec::new()).unwrap();
+        app.loaded = None;
+        let mut cleared = Vec::new();
+        render_fullscreen_image_to(&mut app, &mut image, &mut cleared).unwrap();
+        let cleared = String::from_utf8(cleared).unwrap();
+        assert!(cleared.contains("a=d,d=A"));
+        for id in FULLSCREEN_IMAGE_IDS {
+            assert!(cleared.contains(&format!("a=d,d=I,q=2,i={id}")));
+        }
+        assert!(image.is_none());
+        assert!(app.transmitted_image_ids.is_empty());
+    }
 
     fn picker_app(root: &Path) -> App {
         let list = SharedImageList::new();
