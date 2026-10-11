@@ -373,7 +373,7 @@ fn draw_video(frame: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .border_style(theme.border)
         .title(Line::from(Span::styled(
-            format!(" {} ", filename),
+            format!(" {filename} "),
             theme.title,
         )))
         .title_bottom(bottom_line);
