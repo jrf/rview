@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "rview", about = "A fast terminal image viewer")]
+#[command(name = "rview", version, about = "A fast terminal image viewer")]
 struct Cli {
     /// Image file(s) or directory to display [default: .]
     files: Vec<PathBuf>,
@@ -168,12 +168,11 @@ fn initial_dir_from_paths(paths: &[PathBuf]) -> PathBuf {
             return p.clone();
         }
     }
-    if let Some(first) = paths.first() {
-        if let Some(parent) = first.parent() {
-            if !parent.as_os_str().is_empty() {
-                return parent.to_path_buf();
-            }
-        }
+    if let Some(first) = paths.first()
+        && let Some(parent) = first.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        return parent.to_path_buf();
     }
     PathBuf::from(".")
 }
@@ -198,10 +197,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         pending_emits.extend(app.poll_thumbnails());
 
         #[cfg(feature = "video")]
-        if let Some(ref mut v) = app.video {
-            if v.poll_frame() {
-                app.needs_render = true;
-            }
+        if let Some(ref mut v) = app.video
+            && v.poll_frame()
+        {
+            app.needs_render = true;
         }
 
         if app.scan_complete
@@ -700,29 +699,29 @@ fn render_video_frame(app: &App) -> io::Result<()> {
 
     let mut out = io::stdout().lock();
 
-    if let Some(ref v) = app.video {
-        if let Some(ref img) = v.current_frame {
-            let (cpw, cph) = app.cell_px;
-            let img_cols = img.width().div_ceil(cpw);
-            let img_rows = img.height().div_ceil(cph);
-            let offset_x =
-                app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
-            let offset_y =
-                app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
+    if let Some(ref v) = app.video
+        && let Some(ref img) = v.current_frame
+    {
+        let (cpw, cph) = app.cell_px;
+        let img_cols = img.width().div_ceil(cpw);
+        let img_rows = img.height().div_ceil(cph);
+        let offset_x =
+            app.image_rect.x + (app.image_rect.width.saturating_sub(img_cols as u16)) / 2;
+        let offset_y =
+            app.image_rect.y + (app.image_rect.height.saturating_sub(img_rows as u16)) / 2;
 
-            queue!(out, BeginSynchronizedUpdate)?;
-            queue!(out, cursor::MoveTo(offset_x, offset_y))?;
-            app.graphics.transmit(
-                &mut out,
-                img,
-                &encoder::DisplayOptions {
-                    id: Some(VIDEO_IMAGE_ID),
-                    cols: None,
-                    rows: None,
-                },
-            )?;
-            queue!(out, EndSynchronizedUpdate)?;
-        }
+        queue!(out, BeginSynchronizedUpdate)?;
+        queue!(out, cursor::MoveTo(offset_x, offset_y))?;
+        app.graphics.transmit(
+            &mut out,
+            img,
+            &encoder::DisplayOptions {
+                id: Some(VIDEO_IMAGE_ID),
+                cols: None,
+                rows: None,
+            },
+        )?;
+        queue!(out, EndSynchronizedUpdate)?;
     }
 
     out.flush()

@@ -258,10 +258,10 @@ fn decode_loop(
                     continue;
                 }
 
-                if let Some(frame) = extract_frame(&rgba_frame, &decoded, time_base) {
-                    if frame_tx.send(frame).is_err() {
-                        return;
-                    }
+                if let Some(frame) = extract_frame(&rgba_frame, &decoded, time_base)
+                    && frame_tx.send(frame).is_err()
+                {
+                    return;
                 }
 
                 got_frame = true;
@@ -280,12 +280,11 @@ fn decode_loop(
         let mut decoded = ffmpeg::util::frame::video::Video::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
             let mut rgba_frame = ffmpeg::util::frame::video::Video::empty();
-            if scaler.run(&decoded, &mut rgba_frame).is_ok() {
-                if let Some(frame) = extract_frame(&rgba_frame, &decoded, time_base) {
-                    if frame_tx.send(frame).is_err() {
-                        return;
-                    }
-                }
+            if scaler.run(&decoded, &mut rgba_frame).is_ok()
+                && let Some(frame) = extract_frame(&rgba_frame, &decoded, time_base)
+                && frame_tx.send(frame).is_err()
+            {
+                return;
             }
         }
 

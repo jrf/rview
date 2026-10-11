@@ -307,7 +307,7 @@ fn draw_fullscreen(frame: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .border_style(theme.border)
         .title(Line::from(Span::styled(
-            format!(" {} ", filename),
+            format!(" {filename} "),
             theme.title,
         )))
         .title_bottom(bottom_line);
@@ -676,10 +676,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App) {
                 Line::from(Span::styled(format!(" {desc}"), theme.popup_title))
             } else {
                 Line::from(vec![
-                    Span::styled(
-                        format!(" {:>width$}  ", key, width = key_width),
-                        theme.popup_key,
-                    ),
+                    Span::styled(format!(" {key:>key_width$}  "), theme.popup_key),
                     Span::styled(*desc, theme.popup_desc),
                 ])
             }
