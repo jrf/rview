@@ -425,21 +425,20 @@ impl App {
             .as_ref()
             .and_then(|rx| rx.try_recv().ok());
         if let Some(result) = result {
-            if let Some((idx, rect)) = self.fullscreen_target {
-                if idx == self.current
-                    && rect == self.image_rect
-                    && self.mode == ViewMode::Fullscreen
-                {
-                    match result {
-                        Ok(img) => {
-                            self.loaded = Some(img);
-                            self.error = None;
-                            self.loaded_for_rect = rect;
-                            self.needs_render = true;
-                        }
-                        Err(e) => {
-                            self.error = Some(e.to_string());
-                        }
+            if let Some((idx, rect)) = self.fullscreen_target
+                && idx == self.current
+                && rect == self.image_rect
+                && self.mode == ViewMode::Fullscreen
+            {
+                match result {
+                    Ok(img) => {
+                        self.loaded = Some(img);
+                        self.error = None;
+                        self.loaded_for_rect = rect;
+                        self.needs_render = true;
+                    }
+                    Err(e) => {
+                        self.error = Some(e.to_string());
                     }
                 }
             }
@@ -529,13 +528,13 @@ impl App {
         if let Some(result) = result {
             let idx = self.source_target.take();
             self.source_rx = None;
-            if let (Some(idx), Ok(img)) = (idx, result) {
-                if idx == self.current {
-                    self.source = Some(img);
-                    self.source_for = Some(idx);
-                    self.zoom_dirty = true;
-                    self.needs_render = true;
-                }
+            if let (Some(idx), Ok(img)) = (idx, result)
+                && idx == self.current
+            {
+                self.source = Some(img);
+                self.source_for = Some(idx);
+                self.zoom_dirty = true;
+                self.needs_render = true;
             }
             return true;
         }
@@ -909,16 +908,15 @@ impl App {
         // resize that crop to fill the viewport.
         if self.zoom > 1.0 {
             if self.source_for == Some(self.current) {
-                if self.zoom_dirty
+                if (self.zoom_dirty
                     || self.loaded.is_none()
-                    || self.loaded_for_rect != self.image_rect
+                    || self.loaded_for_rect != self.image_rect)
+                    && let Some(view) = self.build_zoom_view()
                 {
-                    if let Some(view) = self.build_zoom_view() {
-                        self.loaded = Some(view);
-                        self.error = None;
-                        self.loaded_for_rect = self.image_rect;
-                        self.zoom_dirty = false;
-                    }
+                    self.loaded = Some(view);
+                    self.error = None;
+                    self.loaded_for_rect = self.image_rect;
+                    self.zoom_dirty = false;
                 }
                 return;
             }
@@ -948,10 +946,10 @@ impl App {
             return;
         }
 
-        if let Some((_, rect)) = self.fullscreen_target {
-            if rect == self.image_rect {
-                return;
-            }
+        if let Some((_, rect)) = self.fullscreen_target
+            && rect == self.image_rect
+        {
+            return;
         }
 
         self.start_fullscreen_decode(self.current, self.image_rect);
@@ -1262,7 +1260,7 @@ fn try_save_to_disk_cache(
             return None;
         }
     }
-    if sequence % 64 == 0 {
+    if sequence.is_multiple_of(64) {
         prune_disk_cache(parent, 512 * 1024 * 1024);
     }
     Some(())

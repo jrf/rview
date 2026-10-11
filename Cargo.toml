@@ -2,7 +2,7 @@
 name = "rview"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A fast terminal image viewer with Kitty graphics protocol support"
 license = "MIT"
 repository = "https://github.com/jrf/rview"
